@@ -54,7 +54,6 @@ class Delivered(Base):
     Color = Column(String, nullable=True)
     ManufacturingDate = Column('Manufacturing Date', Date, nullable=True)
     Location = Column(String, nullable=True)
-
     # delivery metadata
     DeliveredDateTime = Column('Delivered DateTime', DateTime, nullable=False, default=datetime.utcnow)
    
