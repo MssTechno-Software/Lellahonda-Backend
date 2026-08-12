@@ -35,6 +35,7 @@ class UserUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     username: Optional[str] = None
+    password:Optional[str] = None
     phone_no: Optional[str] = None
     location: Optional[str] = None
     role: Optional[str] = None
@@ -82,6 +83,7 @@ class Stock(StockCreate):
 
 class StockSummary(BaseModel):
     total_remaining: int
+    filtered_total: int = 0
     by_location: List[StockSummaryItem]
     stocks: List[Stock]
 

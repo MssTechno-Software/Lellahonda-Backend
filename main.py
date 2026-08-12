@@ -1,6 +1,7 @@
 # main.py
 from fastapi import FastAPI, Depends, HTTPException, Query, status, Security
 from fastapi.middleware.cors import CORSMiddleware
+from zoneinfo import ZoneInfo
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from typing import List, Annotated
@@ -26,7 +27,7 @@ from sqlalchemy import or_
 import bcrypt
 from fastapi import Query
 
-
+IST = ZoneInfo("Asia/Kolkata")
 # Load environment variables from .env file
 load_dotenv()
 
@@ -295,11 +296,32 @@ def _write_location_log(
     )
     db.add(log)
  
+# def _move_stock_to_delivered(db: Session, stock: models.Stock, actor: models.User) -> models.Delivered:
+#     # skip if already moved (by frame uniqueness)
+#     existing = db.query(models.Delivered).filter(models.Delivered.Frame == stock.Frame).first()
+#     if existing:
+#         # ensure original stock is removed
+#         db.delete(stock)
+#         return existing
+
+#     delivered_row = models.Delivered(
+#         Frame=stock.Frame,
+#         EngineNoMotorNo=stock.EngineNoMotorNo,
+#         ModelVariant=stock.ModelVariant,
+#         ProductName=stock.ProductName,
+#         Color=stock.Color,
+#         ModelName=stock.ModelName,
+#         ManufacturingDate=stock.ManufacturingDate,
+#         Location=stock.Location,  # final location at delivery moment
+#         DeliveredDateTime=datetime.now(timezone.utc),
+#     )
+#     db.add(delivered_row)
+#     db.delete(stock)  # REMOVE from stocks table
+#     return delivered_row
+
 def _move_stock_to_delivered(db: Session, stock: models.Stock, actor: models.User) -> models.Delivered:
-    # skip if already moved (by frame uniqueness)
     existing = db.query(models.Delivered).filter(models.Delivered.Frame == stock.Frame).first()
     if existing:
-        # ensure original stock is removed
         db.delete(stock)
         return existing
 
@@ -311,11 +333,11 @@ def _move_stock_to_delivered(db: Session, stock: models.Stock, actor: models.Use
         Color=stock.Color,
         ModelName=stock.ModelName,
         ManufacturingDate=stock.ManufacturingDate,
-        Location=stock.Location,  # final location at delivery moment
-        DeliveredDateTime=datetime.now(timezone.utc),
+        Location=stock.Location,
+        DeliveredDateTime=datetime.now(IST),
     )
     db.add(delivered_row)
-    db.delete(stock)  # REMOVE from stocks table
+    db.delete(stock)
     return delivered_row
 
 def _write_audit(
@@ -555,10 +577,25 @@ def create_user(
     db.refresh(db_user)
     return db_user
 
+# @app.get("/get_users", response_model=List[schemas.User])
+# def read_all_users(admin_user: Annotated[models.User, Depends(is_admin)], db: Session = Depends(get_db)):
+#     """Retrieves all user records."""
+#     users = db.query(models.User).all()
+#     return users
+
 @app.get("/get_users", response_model=List[schemas.User])
 def read_all_users(admin_user: Annotated[models.User, Depends(is_admin)], db: Session = Depends(get_db)):
-    """Retrieves all user records."""
-    users = db.query(models.User).all()
+    """Retrieves all user records, excluding other admin accounts."""
+    users = (
+        db.query(models.User)
+        .filter(
+            or_(
+                models.User.role != "admin",
+                models.User.id == admin_user.id,
+            )
+        )
+        .all()
+    )
     return users
 
 @app.get("/get_users/{user_id}", response_model=schemas.User)
@@ -570,17 +607,67 @@ def read_user_by_id(user_id: int,admin_user: Annotated[models.User, Depends(is_a
     return user
 
 # update user with role & admin guards
+# @app.put("/update_users/{user_id}", response_model=schemas.User)
+# def update_user(
+#     user_id: int,
+#     user_update: schemas.UserUpdate,
+#     admin_user: Annotated[models.User, Depends(is_admin)],   
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     Admin-only: update a user's details.
+#     - Enforces phone number uniqueness.
+#     - Demotion guard: cannot demote the LAST remaining admin to user.
+#     """
+#     db_user = db.query(models.User).filter(models.User.id == user_id).first()
+#     if not db_user:
+#         raise HTTPException(status_code=404, detail="User not found")
+
+#     # Phone number uniqueness
+#     if user_update.phone_no:
+#         existing_user_with_phone = (
+#             db.query(models.User).filter(models.User.phone_no == user_update.phone_no).first()
+#         )
+#         if existing_user_with_phone and existing_user_with_phone.id != user_id:
+#             raise HTTPException(status_code=400, detail="Mobile number is already linked to another account.")
+
+#     # Demotion guard: prevent removing the last admin
+#     if user_update.role is not None and db_user.role == "admin" and user_update.role == "user":
+#         total_admins = db.query(models.User).filter(models.User.role == "admin").count()
+#         if total_admins <= 1:
+#             raise HTTPException(
+#                 status_code=403,
+#                 detail="Demotion Guard: Cannot remove the last remaining admin."
+#             )
+
+#     # Apply updates
+#     update_data = user_update.model_dump(exclude_unset=True)
+#     for key, value in update_data.items():
+#         setattr(db_user, key, value)
+
+#     db.commit()
+#     db.refresh(db_user)
+#     return db_user
+
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
 @app.put("/update_users/{user_id}", response_model=schemas.User)
 def update_user(
     user_id: int,
     user_update: schemas.UserUpdate,
-    admin_user: Annotated[models.User, Depends(is_admin)],   
+    admin_user: Annotated[models.User, Depends(is_admin)],
     db: Session = Depends(get_db),
 ):
     """
     Admin-only: update a user's details.
     - Enforces phone number uniqueness.
     - Demotion guard: cannot demote the LAST remaining admin to user.
+    - Optionally updates password (hashed before storage).
     """
     db_user = db.query(models.User).filter(models.User.id == user_id).first()
     if not db_user:
@@ -605,13 +692,19 @@ def update_user(
 
     # Apply updates
     update_data = user_update.model_dump(exclude_unset=True)
+
+    # Handle password separately — hash before storing, never mass-assign raw
+    if "password" in update_data:
+        raw_password = update_data.pop("password")
+        if raw_password:  # guard against empty string
+            db_user.password_hash = hash_password(raw_password)  # fixed: matches models.User.password_hash
+
     for key, value in update_data.items():
         setattr(db_user, key, value)
 
     db.commit()
     db.refresh(db_user)
     return db_user
-
 
 # delete returns 200 with message; guards preserved 
 @app.delete("/delete_users/{user_id}", status_code=200)
@@ -693,6 +786,58 @@ INVENTORY_LOCATIONS = [
 ]
 
 
+# @app.get(
+#     "/stocks",
+#     response_model=schemas.StockSummary,
+#     tags=["stocks"]
+# )
+# def get_stocks(
+#     bucket: str = Query(default="all", description="one of: all or a specific location name"),
+#     page: int = Query(1, ge=1),
+#     limit: int = Query(20, ge=1, le=100),
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(get_current_user),
+# ):
+#     total_remaining = db.query(models.Stock).count()
+
+#     summary_items = []
+
+#     for loc in INVENTORY_LOCATIONS:
+#         c = db.query(models.Stock).filter(models.Stock.Location == loc).count()
+
+#         percentage = round((c / total_remaining * 100), 2) if total_remaining else 0
+
+#         summary_items.append(
+#             schemas.StockSummaryItem(
+#                 location=loc,
+#                 count=c,
+#                 percentage=percentage      # <-- Add this field
+#             )
+#         )
+
+#     query = db.query(models.Stock).order_by(models.Stock.id.desc())
+
+#     # Apply location filter
+#     norm_bucket = bucket.strip().lower()
+#     if norm_bucket != "all":
+#         for loc in INVENTORY_LOCATIONS:
+#             if norm_bucket == loc.lower():
+#                 query = query.filter(models.Stock.Location == loc)
+#                 break
+
+#     stock_list = (
+#         query
+#         .offset((page - 1) * limit)
+#         .limit(limit)
+#         .all()
+#     )
+
+#     return {
+#         "total_remaining": total_remaining,
+#         "by_location": summary_items,
+#         "stocks": stock_list
+#     }
+
 @app.get(
     "/stocks",
     response_model=schemas.StockSummary,
@@ -700,6 +845,7 @@ INVENTORY_LOCATIONS = [
 )
 def get_stocks(
     bucket: str = Query(default="all", description="one of: all or a specific location name"),
+    search: Optional[str] = Query(default=None, description="Search by Frame, Engine/Motor No, Product, Model, Color, or Location"),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -708,21 +854,14 @@ def get_stocks(
     total_remaining = db.query(models.Stock).count()
 
     summary_items = []
-
     for loc in INVENTORY_LOCATIONS:
         c = db.query(models.Stock).filter(models.Stock.Location == loc).count()
-
         percentage = round((c / total_remaining * 100), 2) if total_remaining else 0
-
         summary_items.append(
-            schemas.StockSummaryItem(
-                location=loc,
-                count=c,
-                percentage=percentage      # <-- Add this field
-            )
+            schemas.StockSummaryItem(location=loc, count=c, percentage=percentage)
         )
 
-    query = db.query(models.Stock).order_by(models.Stock.id.desc())
+    query = db.query(models.Stock)
 
     # Apply location filter
     norm_bucket = bucket.strip().lower()
@@ -732,8 +871,26 @@ def get_stocks(
                 query = query.filter(models.Stock.Location == loc)
                 break
 
+    # Apply search filter
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                models.Stock.Frame.ilike(term),
+                models.Stock.EngineNoMotorNo.ilike(term),
+                models.Stock.ModelVariant.ilike(term),
+                models.Stock.ProductName.ilike(term),
+                models.Stock.ModelName.ilike(term),
+                models.Stock.Color.ilike(term),
+                models.Stock.Location.ilike(term),
+            )
+        )
+
+    filtered_total = query.count()
+
     stock_list = (
         query
+        .order_by(models.Stock.id.desc())
         .offset((page - 1) * limit)
         .limit(limit)
         .all()
@@ -741,6 +898,7 @@ def get_stocks(
 
     return {
         "total_remaining": total_remaining,
+        "filtered_total": filtered_total,
         "by_location": summary_items,
         "stocks": stock_list
     }
@@ -1024,32 +1182,114 @@ async def upload_stocks_excel_binary(
 
 
 
+# @app.get("/delivered", response_model=schemas.DeliveredList, tags=["delivered"])
+# def list_delivered(
+#     delivered_date: Optional[date] = Query(default=None, description="Filter by exact date YYYY-MM-DD"),
+#     date_from: Optional[date] = Query(default=None, description="Filter range start date"),
+#     date_to: Optional[date] = Query(default=None, description="Filter range end date"),
+#     page: int = Query(1, ge=1),
+#     limit: int = Query(20, ge=1, le=100),
+#     db: Session = Depends(get_db),
+#     admin_user: models.User = Depends(is_admin),
+# ):
+#     q = db.query(models.Delivered)
+
+#     if delivered_date:
+#         start = datetime.combine(delivered_date, datetime.min.time(), tzinfo=timezone.utc)
+#         end = datetime.combine(delivered_date, datetime.max.time(), tzinfo=timezone.utc)
+#         q = q.filter(
+#             models.Delivered.DeliveredDateTime >= start,
+#             models.Delivered.DeliveredDateTime <= end
+#         )
+#     else:
+#         if date_from:
+#             start = datetime.combine(date_from, datetime.min.time(), tzinfo=timezone.utc)
+#             q = q.filter(models.Delivered.DeliveredDateTime >= start)
+#         if date_to:
+#             end = datetime.combine(date_to, datetime.max.time(), tzinfo=timezone.utc)
+#             q = q.filter(models.Delivered.DeliveredDateTime <= end)
+
+#     filtered_total = q.count()
+
+#     records = (
+#         q.order_by(models.Delivered.DeliveredDateTime.desc())
+#         .offset((page - 1) * limit)
+#         .limit(limit)
+#         .all()
+#     )
+
+#     # --- Summary counts (independent of the date filters above) ---
+#     now = datetime.now(timezone.utc)
+#     today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
+#     today_end = datetime.combine(now.date(), datetime.max.time(), tzinfo=timezone.utc)
+#     month_start = datetime.combine(now.date().replace(day=1), datetime.min.time(), tzinfo=timezone.utc)
+
+#     total_delivered = db.query(models.Delivered).count()
+
+#     today_delivered = (
+#         db.query(models.Delivered)
+#         .filter(
+#             models.Delivered.DeliveredDateTime >= today_start,
+#             models.Delivered.DeliveredDateTime <= today_end,
+#         )
+#         .count()
+#     )
+
+#     month_delivered = (
+#         db.query(models.Delivered)
+#         .filter(models.Delivered.DeliveredDateTime >= month_start)
+#         .count()
+#     )
+
+#     return {
+#         "total_delivered": total_delivered,      # all-time total (unaffected by filters/pagination)
+#         "today_delivered": today_delivered,
+#         "month_delivered": month_delivered,
+#         "filtered_total": filtered_total,         # count matching the applied date filters, if any
+#         "items": records
+#     }
+
 @app.get("/delivered", response_model=schemas.DeliveredList, tags=["delivered"])
 def list_delivered(
+    search: Optional[str] = Query(default=None, description="Search by Frame, Engine/Motor No, Product, Model, or Color"),
     delivered_date: Optional[date] = Query(default=None, description="Filter by exact date YYYY-MM-DD"),
     date_from: Optional[date] = Query(default=None, description="Filter range start date"),
     date_to: Optional[date] = Query(default=None, description="Filter range end date"),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db),
-    admin_user: models.User = Depends(is_admin),
+    db: Session = Depends(get_db)
+    #admin_user: models.User = Depends(is_admin),
 ):
     q = db.query(models.Delivered)
 
+    # --- date filters, now interpreted as IST calendar days ---
     if delivered_date:
-        start = datetime.combine(delivered_date, datetime.min.time(), tzinfo=timezone.utc)
-        end = datetime.combine(delivered_date, datetime.max.time(), tzinfo=timezone.utc)
+        start = datetime.combine(delivered_date, datetime.min.time(), tzinfo=IST)
+        end = datetime.combine(delivered_date, datetime.max.time(), tzinfo=IST)
         q = q.filter(
             models.Delivered.DeliveredDateTime >= start,
             models.Delivered.DeliveredDateTime <= end
         )
     else:
         if date_from:
-            start = datetime.combine(date_from, datetime.min.time(), tzinfo=timezone.utc)
+            start = datetime.combine(date_from, datetime.min.time(), tzinfo=IST)
             q = q.filter(models.Delivered.DeliveredDateTime >= start)
         if date_to:
-            end = datetime.combine(date_to, datetime.max.time(), tzinfo=timezone.utc)
+            end = datetime.combine(date_to, datetime.max.time(), tzinfo=IST)
             q = q.filter(models.Delivered.DeliveredDateTime <= end)
+
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        q = q.filter(
+            or_(
+                models.Delivered.Frame.ilike(term),
+                models.Delivered.EngineNoMotorNo.ilike(term),
+                models.Delivered.ModelVariant.ilike(term),
+                models.Delivered.ProductName.ilike(term),
+                models.Delivered.ModelName.ilike(term),
+                models.Delivered.Color.ilike(term),
+            )
+        )
 
     filtered_total = q.count()
 
@@ -1060,11 +1300,11 @@ def list_delivered(
         .all()
     )
 
-    # --- Summary counts (independent of the date filters above) ---
-    now = datetime.now(timezone.utc)
-    today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
-    today_end = datetime.combine(now.date(), datetime.max.time(), tzinfo=timezone.utc)
-    month_start = datetime.combine(now.date().replace(day=1), datetime.min.time(), tzinfo=timezone.utc)
+    # --- summary counts, now using IST "today" / "this month" ---
+    now = datetime.now(IST)
+    today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=IST)
+    today_end = datetime.combine(now.date(), datetime.max.time(), tzinfo=IST)
+    month_start = datetime.combine(now.date().replace(day=1), datetime.min.time(), tzinfo=IST)
 
     total_delivered = db.query(models.Delivered).count()
 
@@ -1084,10 +1324,10 @@ def list_delivered(
     )
 
     return {
-        "total_delivered": total_delivered,      # all-time total (unaffected by filters/pagination)
+        "total_delivered": total_delivered,
         "today_delivered": today_delivered,
         "month_delivered": month_delivered,
-        "filtered_total": filtered_total,         # count matching the applied date filters, if any
+        "filtered_total": filtered_total,
         "items": records
     }
 
@@ -1119,25 +1359,77 @@ def get_location_log_simple(
 
 from fastapi import Query
 
+# @app.get("/audit_logs", tags=["audit"])
+# def get_audit_logs(
+#     admin_user: Annotated[models.User, Depends(is_admin)],
+#     db: Session = Depends(get_db),
+#     page: int = Query(1, ge=1),
+#     limit: int = Query(20, ge=1, le=100)
+# ):
+#     """
+#     Returns simplified audit entries:
+#       - username
+#       - done_by (First Last if available, else username)
+#       - role of the user who performed the action
+#       - action, count, frame, details, at
+#     """
+
+#     offset = (page - 1) * limit
+
+#     logs = (
+#         db.query(models.AuditLog)
+#         .order_by(models.AuditLog.at.desc())
+#         .offset(offset)
+#         .limit(limit)
+#         .all()
+#     )
+
+#     out = []
+#     for l in logs:
+#         full_name = f"{(l.actor_first_name or '').strip()} {(l.actor_last_name or '').strip()}".strip()
+#         done_by = full_name if full_name else (l.actor_username or "")
+
+#         out.append({
+#             "action": l.action,
+#             "count": l.count,
+#             "frame": l.frame,
+#             "details": l.details,
+#             "username": l.actor_username,
+#             "done_by": done_by,
+#             "role": l.actor_role,
+#             "at": l.at,
+#         })
+
+#     return out
+
 @app.get("/audit_logs", tags=["audit"])
 def get_audit_logs(
-    admin_user: Annotated[models.User, Depends(is_admin)],
+    #admin_user: Annotated[models.User, Depends(is_admin)],
     db: Session = Depends(get_db),
+    search: Optional[str] = Query(default=None, description="Search by username, actor name, action, frame, or details"),
     page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100)
+    limit: int = Query(20, ge=1, le=100),
 ):
-    """
-    Returns simplified audit entries:
-      - username
-      - done_by (First Last if available, else username)
-      - role of the user who performed the action
-      - action, count, frame, details, at
-    """
+    query = db.query(models.AuditLog)
 
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                models.AuditLog.actor_username.ilike(term),
+                models.AuditLog.actor_first_name.ilike(term),
+                models.AuditLog.actor_last_name.ilike(term),
+                models.AuditLog.action.ilike(term),
+                models.AuditLog.frame.ilike(term),
+                models.AuditLog.details.ilike(term),
+            )
+        )
+
+    filtered_total = query.count()
     offset = (page - 1) * limit
 
     logs = (
-        db.query(models.AuditLog)
+        query
         .order_by(models.AuditLog.at.desc())
         .offset(offset)
         .limit(limit)
@@ -1148,7 +1440,6 @@ def get_audit_logs(
     for l in logs:
         full_name = f"{(l.actor_first_name or '').strip()} {(l.actor_last_name or '').strip()}".strip()
         done_by = full_name if full_name else (l.actor_username or "")
-
         out.append({
             "action": l.action,
             "count": l.count,
@@ -1160,4 +1451,9 @@ def get_audit_logs(
             "at": l.at,
         })
 
-    return out
+    return {
+        "filtered_total": filtered_total,
+        "page": page,
+        "limit": limit,
+        "items": out,
+    }
