@@ -335,7 +335,7 @@ def _move_stock_to_delivered(db: Session, stock: models.Stock, actor: models.Use
         ModelName=stock.ModelName,
         ManufacturingDate=stock.ManufacturingDate,
         Location=stock.Location,
-        DeliveredDateTime=datetime.now(IST),
+        DeliveredDateTime=datetime.now(IST).replace(tzinfo=None),
     )
     db.add(delivered_row)
     db.delete(stock)
@@ -1351,19 +1351,19 @@ def list_delivered(
 
     # --- date filters, now interpreted as IST calendar days ---
     if delivered_date:
-        start = datetime.combine(delivered_date, datetime.min.time(), tzinfo=IST)
-        end = datetime.combine(delivered_date, datetime.max.time(), tzinfo=IST)
+        start = datetime.combine(delivered_date, datetime.min.time())
+        end = datetime.combine(delivered_date, datetime.max.time())
         q = q.filter(
             models.Delivered.DeliveredDateTime >= start,
             models.Delivered.DeliveredDateTime <= end
-        )
+            )
     else:
         if date_from:
-            start = datetime.combine(date_from, datetime.min.time(), tzinfo=IST)
+            start = datetime.combine(date_from, datetime.min.time())
             q = q.filter(models.Delivered.DeliveredDateTime >= start)
-        if date_to:
-            end = datetime.combine(date_to, datetime.max.time(), tzinfo=IST)
-            q = q.filter(models.Delivered.DeliveredDateTime <= end)
+            if date_to:
+                end = datetime.combine(date_to, datetime.max.time())
+                q = q.filter(models.Delivered.DeliveredDateTime <= end)
 
     if search and search.strip():
         term = f"%{search.strip()}%"
@@ -1388,10 +1388,10 @@ def list_delivered(
     )
 
     # --- summary counts, now using IST "today" / "this month" ---
-    now = datetime.now(IST)
-    today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=IST)
-    today_end = datetime.combine(now.date(), datetime.max.time(), tzinfo=IST)
-    month_start = datetime.combine(now.date().replace(day=1), datetime.min.time(), tzinfo=IST)
+    now = datetime.now(IST).replace(tzinfo=None)
+    today_start = datetime.combine(now.date(), datetime.min.time())
+    today_end = datetime.combine(now.date(), datetime.max.time())
+    month_start = datetime.combine(now.date().replace(day=1), datetime.min.time())
 
     total_delivered = db.query(models.Delivered).count()
 

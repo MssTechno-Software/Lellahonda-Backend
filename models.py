@@ -58,7 +58,7 @@ class Delivered(Base):
     Location = Column(String, nullable=True)
     # delivery metadata
     #DeliveredDateTime = Column('Delivered DateTime', DateTime, nullable=False, default=datetime.utcnow)
-    DeliveredDateTime = Column('Delivered DateTime', DateTime(timezone=True), nullable=False, default=lambda: datetime.now(IST))
+    DeliveredDateTime = Column('Delivered DateTime', DateTime, nullable=False, default=lambda: datetime.now(IST).replace(tzinfo=None))
     
 class AuditLog(Base):
     __tablename__ = "audit_log"
