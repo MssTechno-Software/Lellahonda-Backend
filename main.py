@@ -26,6 +26,7 @@ from datetime import timedelta, datetime, timezone, date
 from sqlalchemy import or_
 import bcrypt
 from fastapi import Query
+from sqlalchemy import func
 
 IST = ZoneInfo("Asia/Kolkata")
 # Load environment variables from .env file
@@ -838,6 +839,71 @@ INVENTORY_LOCATIONS = [
 #         "stocks": stock_list
 #     }
 
+# @app.get(
+#     "/stocks",
+#     response_model=schemas.StockSummary,
+#     tags=["stocks"]
+# )
+# def get_stocks(
+#     bucket: str = Query(default="all", description="one of: all or a specific location name"),
+#     search: Optional[str] = Query(default=None, description="Search by Frame, Engine/Motor No, Product, Model, Color, or Location"),
+#     page: int = Query(1, ge=1),
+#     limit: int = Query(20, ge=1, le=100),
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(get_current_user),
+# ):
+#     total_remaining = db.query(models.Stock).count()
+
+#     summary_items = []
+#     for loc in INVENTORY_LOCATIONS:
+#         c = db.query(models.Stock).filter(models.Stock.Location == loc).count()
+#         percentage = round((c / total_remaining * 100), 2) if total_remaining else 0
+#         summary_items.append(
+#             schemas.StockSummaryItem(location=loc, count=c, percentage=percentage)
+#         )
+
+#     query = db.query(models.Stock)
+
+#     # Apply location filter
+#     norm_bucket = bucket.strip().lower()
+#     if norm_bucket != "all":
+#         for loc in INVENTORY_LOCATIONS:
+#             if norm_bucket == loc.lower():
+#                 query = query.filter(models.Stock.Location == loc)
+#                 break
+
+#     # Apply search filter
+#     if search and search.strip():
+#         term = f"%{search.strip()}%"
+#         query = query.filter(
+#             or_(
+#                 models.Stock.Frame.ilike(term),
+#                 models.Stock.EngineNoMotorNo.ilike(term),
+#                 models.Stock.ModelVariant.ilike(term),
+#                 models.Stock.ProductName.ilike(term),
+#                 models.Stock.ModelName.ilike(term),
+#                 models.Stock.Color.ilike(term),
+#                 models.Stock.Location.ilike(term),
+#             )
+#         )
+
+#     filtered_total = query.count()
+
+#     stock_list = (
+#         query
+#         .order_by(models.Stock.id.desc())
+#         .offset((page - 1) * limit)
+#         .limit(limit)
+#         .all()
+#     )
+
+#     return {
+#         "total_remaining": total_remaining,
+#         "filtered_total": filtered_total,
+#         "by_location": summary_items,
+#         "stocks": stock_list
+#     }
+
 @app.get(
     "/stocks",
     response_model=schemas.StockSummary,
@@ -853,25 +919,47 @@ def get_stocks(
 ):
     total_remaining = db.query(models.Stock).count()
 
+    # Base query used for the location breakdown — reflects search, NOT bucket,
+    # so the breakdown stays meaningful regardless of which bucket is selected.
+    breakdown_query = db.query(models.Stock)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        breakdown_query = breakdown_query.filter(
+            or_(
+                models.Stock.Frame.ilike(term),
+                models.Stock.EngineNoMotorNo.ilike(term),
+                models.Stock.ModelVariant.ilike(term),
+                models.Stock.ProductName.ilike(term),
+                models.Stock.ModelName.ilike(term),
+                models.Stock.Color.ilike(term),
+                models.Stock.Location.ilike(term),
+            )
+        )
+    breakdown_total = breakdown_query.count()
+
     summary_items = []
     for loc in INVENTORY_LOCATIONS:
-        c = db.query(models.Stock).filter(models.Stock.Location == loc).count()
-        percentage = round((c / total_remaining * 100), 2) if total_remaining else 0
+        # case/whitespace-insensitive match so stray casing doesn't drop rows from every bucket
+        c = breakdown_query.filter(
+            func.lower(func.trim(models.Stock.Location)) == loc.lower()
+        ).count()
+        percentage = round((c / breakdown_total * 100), 2) if breakdown_total else 0
         summary_items.append(
             schemas.StockSummaryItem(location=loc, count=c, percentage=percentage)
         )
 
+    # Query used for the actual returned rows — applies both bucket and search
     query = db.query(models.Stock)
 
-    # Apply location filter
     norm_bucket = bucket.strip().lower()
     if norm_bucket != "all":
         for loc in INVENTORY_LOCATIONS:
             if norm_bucket == loc.lower():
-                query = query.filter(models.Stock.Location == loc)
+                query = query.filter(
+                    func.lower(func.trim(models.Stock.Location)) == loc.lower()
+                )
                 break
 
-    # Apply search filter
     if search and search.strip():
         term = f"%{search.strip()}%"
         query = query.filter(
@@ -902,7 +990,6 @@ def get_stocks(
         "by_location": summary_items,
         "stocks": stock_list
     }
-
 
 @app.get("/stocks/{stock_id}", response_model=schemas.Stock)
 def read_stock_by_id(
