@@ -3,6 +3,8 @@ from database import Base
 from sqlalchemy.sql import func
 from datetime import datetime
 from sqlalchemy.types import Text as SAText
+from zoneinfo import ZoneInfo
+IST = ZoneInfo("Asia/Kolkata")
 
 class User(Base):
     __tablename__ = "users"
