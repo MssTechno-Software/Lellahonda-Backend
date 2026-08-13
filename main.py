@@ -137,146 +137,7 @@ def _to_date(val):
     except Exception:
         return None
 
-def _normalize_stock_payload(d: dict) -> dict:
-    allowed = {
-        "Frame",
-        "EngineNoMotorNo",
-        "ModelVariant",
-        "ProductName",
-        "Color",
-        "ModelName",
-        "ManufacturingDate",
-        "Location",
-        "StockTrasnferDate",
-    }
-    data = {k: v for k, v in d.items() if k in allowed}
 
-    # Default Location if blank/missing
-    loc = data.get("Location")
-    if loc is None or str(loc).strip().lower() in {"", "none", "nan"}:
-        data["Location"] = "Godown"
-    if "ManufacturingDate" in data:
-        data["ManufacturingDate"] = _to_date(data.get("ManufacturingDate"))
-    if "StockTrasnferDate" in data:
-        data["StockTrasnferDate"] = _to_date(data.get("StockTrasnferDate"))
-
-    return data
-
-def _excel_to_records(xlsx_bytes: bytes) -> list[dict]:
-    
-    try:
-        df = pd.read_excel(_io.BytesIO(xlsx_bytes))
-    except Exception:
-        try:
-            df = pd.read_csv(_io.BytesIO(xlsx_bytes))  
-        except Exception:
-            raise ValueError("File is not a valid Excel or CSV format.")  
-
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # 2) Map variants
-    alias_map = {
-        # FRAME
-        "frame": "Frame",
-        "frame no": "Frame",
-        "frame number": "Frame",
-        "frame #": "Frame",
-        "frameno": "Frame",
-        "chassis no": "Frame",
-        "chassis number": "Frame",
-
-        # ENGINE NO / MOTOR NO
-        "engine no": "Engine No/Motor No",
-        "engine number": "Engine No/Motor No",
-        "motor no": "Engine No/Motor No",
-        "motor number": "Engine No/Motor No",
-        "engine no/motor no": "Engine No/Motor No",
-
-        # MODEL VARIANT
-        "model variant": "Model Variant",
-        "variant": "Model Variant",
-        "modelvariant": "Model Variant",
-
-        # MODEL NAME (your new field)
-        "model name": "Model Name",
-        "model": "Model Name",
-        "modelname": "Model Name",
-        "m name": "Model Name",
-
-        # PRODUCT NAME
-        "product name": "Product Name",
-        "product": "Product Name",
-
-        # COLOR
-        "color": "Color",
-        "colour": "Color",
-
-        # MANUFACTURING DATE
-        "manufacturing date": "Manufacturing Date",
-        "mfg date": "Manufacturing Date",
-        "mfd date": "Manufacturing Date",
-        "mfd": "Manufacturing Date",
-        "mfg": "Manufacturing Date",
-
-        # LOCATION
-        "location": "Location",
-        "loc": "Location",
-
-        # STOCK TRANSFER DATE (typo preserved because DB has typo)
-        "stock trasnfer date": "Stock Trasnfer Date",
-        "stock transfer date": "Stock Trasnfer Date",
-        "transfer date": "Stock Trasnfer Date",
-        "transferdate": "Stock Trasnfer Date",
-    }
-
-
-    kept_cols = {}
-    for col in df.columns:
-        key = alias_map.get(col.strip().lower())
-        if key:
-            kept_cols[col] = key
-
-    if not kept_cols:
-        raise ValueError(f"No valid columns found. Got: {list(df.columns)}")
-
-    df = df.rename(columns=kept_cols)
-    df = df[list(kept_cols.values())]
-
-
-    # 3) Normalize NaN -> None
-    df = df.where(pd.notnull(df), None)
-
-    if "Location" not in df.columns:
-        df["Location"] = "Godown"
-    else:
-        def _fix_loc(v):
-            if v is None:
-                return "Godown"
-            if isinstance(v, float) and pd.isna(v):
-                return "Godown"
-            if isinstance(v, str) and not v.strip():
-                return "Godown"
-            return str(v)
-        df["Location"] = df["Location"].map(_fix_loc)
-    # END LOCATION BLOCK
-
-    # 4) Convert date-like to ISO strings
-    def _date_to_iso(val):
-        d = _to_date(val)
-        return None if d is None else d.isoformat()
-
-    if "Manufacturing Date" in df.columns:
-        df["Manufacturing Date"] = df["Manufacturing Date"].map(_date_to_iso)
-    if "Stock Trasnfer Date" in df.columns:
-        df["Stock Trasnfer Date"] = df["Stock Trasnfer Date"].map(_date_to_iso)
-
-    # 5) Build StockCreate
-    raw_rows = df.to_dict(orient="records")
-    records = []
-    for row in raw_rows:
-        sc = schemas.StockCreate(**row)                
-        records.append(sc.model_dump(by_alias=False))   
-    return records
 
 
 def _write_location_log(
@@ -297,28 +158,6 @@ def _write_location_log(
     )
     db.add(log)
  
-# def _move_stock_to_delivered(db: Session, stock: models.Stock, actor: models.User) -> models.Delivered:
-#     # skip if already moved (by frame uniqueness)
-#     existing = db.query(models.Delivered).filter(models.Delivered.Frame == stock.Frame).first()
-#     if existing:
-#         # ensure original stock is removed
-#         db.delete(stock)
-#         return existing
-
-#     delivered_row = models.Delivered(
-#         Frame=stock.Frame,
-#         EngineNoMotorNo=stock.EngineNoMotorNo,
-#         ModelVariant=stock.ModelVariant,
-#         ProductName=stock.ProductName,
-#         Color=stock.Color,
-#         ModelName=stock.ModelName,
-#         ManufacturingDate=stock.ManufacturingDate,
-#         Location=stock.Location,  # final location at delivery moment
-#         DeliveredDateTime=datetime.now(timezone.utc),
-#     )
-#     db.add(delivered_row)
-#     db.delete(stock)  # REMOVE from stocks table
-#     return delivered_row
 
 def _move_stock_to_delivered(db: Session, stock: models.Stock, actor: models.User) -> models.Delivered:
     existing = db.query(models.Delivered).filter(models.Delivered.Frame == stock.Frame).first()
@@ -585,18 +424,18 @@ def create_user(
 #     return users
 
 @app.get("/get_users", response_model=List[schemas.User])
-def read_all_users(admin_user: Annotated[models.User, Depends(is_admin)], db: Session = Depends(get_db)):
-    """Retrieves all user records, excluding other admin accounts."""
+def read_all_users(
+    admin_user: Annotated[models.User, Depends(is_admin)],
+    db: Session = Depends(get_db)
+):
+    """Retrieves all users except the currently logged-in admin."""
+
     users = (
         db.query(models.User)
-        .filter(
-            or_(
-                models.User.role != "admin",
-                models.User.id == admin_user.id,
-            )
-        )
+        .filter(models.User.id != admin_user.id)
         .all()
     )
+
     return users
 
 @app.get("/get_users/{user_id}", response_model=schemas.User)
@@ -607,48 +446,6 @@ def read_user_by_id(user_id: int,admin_user: Annotated[models.User, Depends(is_a
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-# update user with role & admin guards
-# @app.put("/update_users/{user_id}", response_model=schemas.User)
-# def update_user(
-#     user_id: int,
-#     user_update: schemas.UserUpdate,
-#     admin_user: Annotated[models.User, Depends(is_admin)],   
-#     db: Session = Depends(get_db),
-# ):
-#     """
-#     Admin-only: update a user's details.
-#     - Enforces phone number uniqueness.
-#     - Demotion guard: cannot demote the LAST remaining admin to user.
-#     """
-#     db_user = db.query(models.User).filter(models.User.id == user_id).first()
-#     if not db_user:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     # Phone number uniqueness
-#     if user_update.phone_no:
-#         existing_user_with_phone = (
-#             db.query(models.User).filter(models.User.phone_no == user_update.phone_no).first()
-#         )
-#         if existing_user_with_phone and existing_user_with_phone.id != user_id:
-#             raise HTTPException(status_code=400, detail="Mobile number is already linked to another account.")
-
-#     # Demotion guard: prevent removing the last admin
-#     if user_update.role is not None and db_user.role == "admin" and user_update.role == "user":
-#         total_admins = db.query(models.User).filter(models.User.role == "admin").count()
-#         if total_admins <= 1:
-#             raise HTTPException(
-#                 status_code=403,
-#                 detail="Demotion Guard: Cannot remove the last remaining admin."
-#             )
-
-#     # Apply updates
-#     update_data = user_update.model_dump(exclude_unset=True)
-#     for key, value in update_data.items():
-#         setattr(db_user, key, value)
-
-#     db.commit()
-#     db.refresh(db_user)
-#     return db_user
 
 from passlib.context import CryptContext
 
@@ -787,122 +584,6 @@ INVENTORY_LOCATIONS = [
 ]
 
 
-# @app.get(
-#     "/stocks",
-#     response_model=schemas.StockSummary,
-#     tags=["stocks"]
-# )
-# def get_stocks(
-#     bucket: str = Query(default="all", description="one of: all or a specific location name"),
-#     page: int = Query(1, ge=1),
-#     limit: int = Query(20, ge=1, le=100),
-#     db: Session = Depends(get_db),
-#     current_user: models.User = Depends(get_current_user),
-# ):
-#     total_remaining = db.query(models.Stock).count()
-
-#     summary_items = []
-
-#     for loc in INVENTORY_LOCATIONS:
-#         c = db.query(models.Stock).filter(models.Stock.Location == loc).count()
-
-#         percentage = round((c / total_remaining * 100), 2) if total_remaining else 0
-
-#         summary_items.append(
-#             schemas.StockSummaryItem(
-#                 location=loc,
-#                 count=c,
-#                 percentage=percentage      # <-- Add this field
-#             )
-#         )
-
-#     query = db.query(models.Stock).order_by(models.Stock.id.desc())
-
-#     # Apply location filter
-#     norm_bucket = bucket.strip().lower()
-#     if norm_bucket != "all":
-#         for loc in INVENTORY_LOCATIONS:
-#             if norm_bucket == loc.lower():
-#                 query = query.filter(models.Stock.Location == loc)
-#                 break
-
-#     stock_list = (
-#         query
-#         .offset((page - 1) * limit)
-#         .limit(limit)
-#         .all()
-#     )
-
-#     return {
-#         "total_remaining": total_remaining,
-#         "by_location": summary_items,
-#         "stocks": stock_list
-#     }
-
-# @app.get(
-#     "/stocks",
-#     response_model=schemas.StockSummary,
-#     tags=["stocks"]
-# )
-# def get_stocks(
-#     bucket: str = Query(default="all", description="one of: all or a specific location name"),
-#     search: Optional[str] = Query(default=None, description="Search by Frame, Engine/Motor No, Product, Model, Color, or Location"),
-#     page: int = Query(1, ge=1),
-#     limit: int = Query(20, ge=1, le=100),
-#     db: Session = Depends(get_db),
-#     current_user: models.User = Depends(get_current_user),
-# ):
-#     total_remaining = db.query(models.Stock).count()
-
-#     summary_items = []
-#     for loc in INVENTORY_LOCATIONS:
-#         c = db.query(models.Stock).filter(models.Stock.Location == loc).count()
-#         percentage = round((c / total_remaining * 100), 2) if total_remaining else 0
-#         summary_items.append(
-#             schemas.StockSummaryItem(location=loc, count=c, percentage=percentage)
-#         )
-
-#     query = db.query(models.Stock)
-
-#     # Apply location filter
-#     norm_bucket = bucket.strip().lower()
-#     if norm_bucket != "all":
-#         for loc in INVENTORY_LOCATIONS:
-#             if norm_bucket == loc.lower():
-#                 query = query.filter(models.Stock.Location == loc)
-#                 break
-
-#     # Apply search filter
-#     if search and search.strip():
-#         term = f"%{search.strip()}%"
-#         query = query.filter(
-#             or_(
-#                 models.Stock.Frame.ilike(term),
-#                 models.Stock.EngineNoMotorNo.ilike(term),
-#                 models.Stock.ModelVariant.ilike(term),
-#                 models.Stock.ProductName.ilike(term),
-#                 models.Stock.ModelName.ilike(term),
-#                 models.Stock.Color.ilike(term),
-#                 models.Stock.Location.ilike(term),
-#             )
-#         )
-
-#     filtered_total = query.count()
-
-#     stock_list = (
-#         query
-#         .order_by(models.Stock.id.desc())
-#         .offset((page - 1) * limit)
-#         .limit(limit)
-#         .all()
-#     )
-
-#     return {
-#         "total_remaining": total_remaining,
-#         "filtered_total": filtered_total,
-#         "by_location": summary_items,
-#         "stocks": stock_list
-#     }
 
 @app.get(
     "/stocks",
@@ -1211,130 +892,1125 @@ def update_stock_location(
 from fastapi import UploadFile, File
 from typing import Annotated
 
+
+# ============================================================
+# EXCEL / CSV STOCK UPLOAD HELPERS
+# ============================================================
+
+def _excel_to_records(xlsx_bytes: bytes) -> list[dict]:
+    """
+    Reads Excel/CSV file and converts every row into a dictionary.
+
+    IMPORTANT:
+    - Empty fields are allowed.
+    - Empty fields are converted to None.
+    - Frame is NOT validated here.
+    - Frame validation is done row-by-row during upload.
+    """
+
+    # --------------------------------------------------------
+    # 1. Read Excel
+    # --------------------------------------------------------
+    try:
+        df = pd.read_excel(io.BytesIO(xlsx_bytes))
+
+    except Exception:
+        # ----------------------------------------------------
+        # Try CSV if Excel parsing fails
+        # ----------------------------------------------------
+        try:
+            df = pd.read_csv(io.BytesIO(xlsx_bytes))
+
+        except Exception:
+            raise ValueError(
+                "File is not a valid Excel or CSV format."
+            )
+
+    # --------------------------------------------------------
+    # 2. Clean column names
+    # --------------------------------------------------------
+    df.columns = [
+        str(column).strip()
+        for column in df.columns
+    ]
+
+    # --------------------------------------------------------
+    # 3. Excel column aliases
+    # --------------------------------------------------------
+    alias_map = {
+
+        # ---------------- FRAME ----------------
+        "frame": "Frame",
+        "frame no": "Frame",
+        "frame number": "Frame",
+        "frame #": "Frame",
+        "frameno": "Frame",
+        "chassis no": "Frame",
+        "chassis number": "Frame",
+
+        # ---------------- ENGINE / MOTOR ----------------
+        "engine no": "Engine No/Motor No",
+        "engine number": "Engine No/Motor No",
+        "motor no": "Engine No/Motor No",
+        "motor number": "Engine No/Motor No",
+        "engine no/motor no": "Engine No/Motor No",
+        "engine/motor no": "Engine No/Motor No",
+        "engine motor no": "Engine No/Motor No",
+
+        # ---------------- MODEL VARIANT ----------------
+        "model variant": "Model Variant",
+        "variant": "Model Variant",
+        "modelvariant": "Model Variant",
+
+        # ---------------- MODEL NAME ----------------
+        "model name": "Model Name",
+        "model": "Model Name",
+        "modelname": "Model Name",
+        "m name": "Model Name",
+
+        # ---------------- PRODUCT NAME ----------------
+        "product name": "Product Name",
+        "product": "Product Name",
+        "productname": "Product Name",
+
+        # ---------------- COLOR ----------------
+        "color": "Color",
+        "colour": "Color",
+
+        # ---------------- MANUFACTURING DATE ----------------
+        "manufacturing date": "Manufacturing Date",
+        "mfg date": "Manufacturing Date",
+        "mfd date": "Manufacturing Date",
+        "mfd": "Manufacturing Date",
+        "mfg": "Manufacturing Date",
+
+        # ---------------- LOCATION ----------------
+        "location": "Location",
+        "loc": "Location",
+
+        # ---------------- STOCK TRANSFER DATE ----------------
+        "stock trasnfer date": "Stock Trasnfer Date",
+        "stock transfer date": "Stock Trasnfer Date",
+        "transfer date": "Stock Trasnfer Date",
+        "transferdate": "Stock Trasnfer Date",
+    }
+
+    # --------------------------------------------------------
+    # 4. Find valid columns
+    # --------------------------------------------------------
+    kept_cols = {}
+
+    for col in df.columns:
+
+        normalized_col = col.strip().lower()
+
+        mapped_column = alias_map.get(normalized_col)
+
+        if mapped_column:
+            kept_cols[col] = mapped_column
+
+    # --------------------------------------------------------
+    # No valid columns
+    # --------------------------------------------------------
+    if not kept_cols:
+        raise ValueError(
+            f"No valid columns found. "
+            f"Got: {list(df.columns)}"
+        )
+
+    # --------------------------------------------------------
+    # Rename Excel columns
+    # --------------------------------------------------------
+    df = df.rename(columns=kept_cols)
+
+    # Keep only recognized columns
+    df = df[
+        list(kept_cols.values())
+    ]
+
+    # --------------------------------------------------------
+    # 5. Convert pandas NaN / NaT to None
+    # --------------------------------------------------------
+    df = df.where(
+        pd.notnull(df),
+        None
+    )
+
+    # --------------------------------------------------------
+    # 6. Ensure all expected columns exist
+    # --------------------------------------------------------
+    expected_columns = [
+        "Frame",
+        "Engine No/Motor No",
+        "Model Variant",
+        "Product Name",
+        "Color",
+        "Model Name",
+        "Manufacturing Date",
+        "Location",
+        "Stock Trasnfer Date",
+    ]
+
+    for column in expected_columns:
+
+        if column not in df.columns:
+            df[column] = None
+
+    # --------------------------------------------------------
+    # 7. Location normalization
+    # --------------------------------------------------------
+    def _fix_location(value):
+
+        if value is None:
+            return "Godown"
+
+        try:
+            if pd.isna(value):
+                return "Godown"
+        except Exception:
+            pass
+
+        if isinstance(value, str):
+
+            value = value.strip()
+
+            if not value:
+                return "Godown"
+
+            if value.lower() in {
+                "none",
+                "nan",
+                "null",
+            }:
+                return "Godown"
+
+            return value
+
+        return str(value)
+
+    df["Location"] = df["Location"].map(
+        _fix_location
+    )
+
+    # --------------------------------------------------------
+    # 8. Date conversion helper
+    # --------------------------------------------------------
+    def _date_to_iso(value):
+
+        if value is None:
+            return None
+
+        try:
+
+            parsed_date = _to_date(value)
+
+            if parsed_date is None:
+                return None
+
+            return parsed_date.isoformat()
+
+        except Exception:
+            return None
+
+    # --------------------------------------------------------
+    # Manufacturing Date
+    # --------------------------------------------------------
+    df["Manufacturing Date"] = (
+        df["Manufacturing Date"]
+        .map(_date_to_iso)
+    )
+
+    # --------------------------------------------------------
+    # Stock Transfer Date
+    # --------------------------------------------------------
+    df["Stock Trasnfer Date"] = (
+        df["Stock Trasnfer Date"]
+        .map(_date_to_iso)
+    )
+
+    # --------------------------------------------------------
+    # 9. Convert rows
+    #
+    # IMPORTANT:
+    # We DO NOT use schemas.StockCreate here.
+    #
+    # That is what allows empty fields.
+    # --------------------------------------------------------
+    raw_rows = df.to_dict(
+        orient="records"
+    )
+
+    records = []
+
+    for row in raw_rows:
+
+        # ----------------------------------------------
+        # Helper to normalize empty cell
+        # ----------------------------------------------
+        def clean_value(value):
+
+            if value is None:
+                return None
+
+            try:
+                if pd.isna(value):
+                    return None
+            except Exception:
+                pass
+
+            if isinstance(value, str):
+
+                value = value.strip()
+
+                if not value:
+                    return None
+
+                if value.lower() in {
+                    "nan",
+                    "none",
+                    "null",
+                }:
+                    return None
+
+                return value
+
+            return value
+
+        # ----------------------------------------------
+        # Build record
+        # ----------------------------------------------
+        record = {
+
+            "Frame": clean_value(
+                row.get("Frame")
+            ),
+
+            "EngineNoMotorNo": clean_value(
+                row.get("Engine No/Motor No")
+            ),
+
+            "ModelVariant": clean_value(
+                row.get("Model Variant")
+            ),
+
+            "ProductName": clean_value(
+                row.get("Product Name")
+            ),
+
+            "Color": clean_value(
+                row.get("Color")
+            ),
+
+            "ModelName": clean_value(
+                row.get("Model Name")
+            ),
+
+            "ManufacturingDate": clean_value(
+                row.get("Manufacturing Date")
+            ),
+
+            "Location": clean_value(
+                row.get("Location")
+            ) or "Godown",
+
+            "StockTrasnferDate": clean_value(
+                row.get("Stock Trasnfer Date")
+            ),
+        }
+
+        records.append(record)
+
+    return records
+
+
+# ============================================================
+# NORMALIZE STOCK PAYLOAD
+# ============================================================
+
+def _normalize_stock_payload(d: dict) -> dict:
+    """
+    Normalize stock data before inserting into the database.
+
+    Rules:
+    - Empty strings / NaN / None -> None
+    - Empty Location -> Godown
+    - Dates -> Python date objects
+    """
+
+    allowed = {
+        "Frame",
+        "EngineNoMotorNo",
+        "ModelVariant",
+        "ProductName",
+        "Color",
+        "ModelName",
+        "ManufacturingDate",
+        "Location",
+        "StockTrasnferDate",
+    }
+
+    data = {}
+
+    for key, value in d.items():
+
+        if key not in allowed:
+            continue
+
+        # None
+        if value is None:
+            data[key] = None
+            continue
+
+        # Pandas NaN / NaT
+        try:
+            if pd.isna(value):
+                data[key] = None
+                continue
+        except Exception:
+            pass
+
+        # Empty string
+        if isinstance(value, str):
+            value = value.strip()
+
+            if value == "":
+                data[key] = None
+                continue
+
+        data[key] = value
+
+    # ---------------------------------------------------------
+    # Default Location
+    # ---------------------------------------------------------
+
+    location = data.get("Location")
+
+    if (
+        location is None
+        or str(location).strip().lower() in {
+            "",
+            "none",
+            "nan",
+            "null",
+        }
+    ):
+        data["Location"] = "Godown"
+
+    # ---------------------------------------------------------
+    # Manufacturing Date
+    # ---------------------------------------------------------
+
+    if "ManufacturingDate" in data:
+        data["ManufacturingDate"] = _to_date(
+            data.get("ManufacturingDate")
+        )
+
+    # ---------------------------------------------------------
+    # Stock Transfer Date
+    # ---------------------------------------------------------
+
+    if "StockTrasnferDate" in data:
+        data["StockTrasnferDate"] = _to_date(
+            data.get("StockTrasnferDate")
+        )
+
+    return data
+
+
+def _excel_to_records(xlsx_bytes: bytes) -> list[dict]:
+    """
+    Read Excel/CSV and convert it into normalized stock dictionaries.
+
+    Important:
+    We DO NOT use schemas.StockCreate here because that schema
+    may reject rows containing empty fields.
+
+    Frame is validated later during the upload process.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Read Excel
+    # ---------------------------------------------------------
+
+    try:
+        df = pd.read_excel(io.BytesIO(xlsx_bytes))
+
+    except Exception:
+
+        try:
+            df = pd.read_csv(io.BytesIO(xlsx_bytes))
+
+        except Exception:
+            raise ValueError(
+                "The uploaded file is not a valid Excel or CSV file."
+            )
+
+    # ---------------------------------------------------------
+    # 2. Clean column names
+    # ---------------------------------------------------------
+
+    df.columns = [
+        str(column).strip()
+        for column in df.columns
+    ]
+
+    # ---------------------------------------------------------
+    # 3. Excel column aliases
+    # ---------------------------------------------------------
+
+    alias_map = {
+
+        # FRAME
+        "frame": "Frame",
+        "frame no": "Frame",
+        "frame number": "Frame",
+        "frame #": "Frame",
+        "frameno": "Frame",
+        "chassis no": "Frame",
+        "chassis number": "Frame",
+
+        # ENGINE / MOTOR
+        "engine no": "Engine No/Motor No",
+        "engine number": "Engine No/Motor No",
+        "motor no": "Engine No/Motor No",
+        "motor number": "Engine No/Motor No",
+        "engine no/motor no": "Engine No/Motor No",
+
+        # MODEL VARIANT
+        "model variant": "Model Variant",
+        "variant": "Model Variant",
+        "modelvariant": "Model Variant",
+
+        # MODEL NAME
+        "model name": "Model Name",
+        "model": "Model Name",
+        "modelname": "Model Name",
+        "m name": "Model Name",
+
+        # PRODUCT NAME
+        "product name": "Product Name",
+        "product": "Product Name",
+
+        # COLOR
+        "color": "Color",
+        "colour": "Color",
+
+        # MANUFACTURING DATE
+        "manufacturing date": "Manufacturing Date",
+        "mfg date": "Manufacturing Date",
+        "mfd date": "Manufacturing Date",
+        "mfd": "Manufacturing Date",
+        "mfg": "Manufacturing Date",
+
+        # LOCATION
+        "location": "Location",
+        "loc": "Location",
+
+        # STOCK TRANSFER DATE
+        "stock trasnfer date": "Stock Trasnfer Date",
+        "stock transfer date": "Stock Trasnfer Date",
+        "transfer date": "Stock Trasnfer Date",
+        "transferdate": "Stock Trasnfer Date",
+    }
+
+    # ---------------------------------------------------------
+    # 4. Find valid columns
+    # ---------------------------------------------------------
+
+    kept_cols = {}
+
+    for col in df.columns:
+
+        key = alias_map.get(
+            col.strip().lower()
+        )
+
+        if key:
+            kept_cols[col] = key
+
+    if not kept_cols:
+        raise ValueError(
+            "No valid stock columns were found in the Excel file."
+        )
+
+    # Rename only recognized columns
+    df = df.rename(columns=kept_cols)
+
+    # Keep only recognized columns
+    df = df[list(kept_cols.values())]
+
+    # ---------------------------------------------------------
+    # 5. Convert NaN to None
+    # ---------------------------------------------------------
+
+    df = df.where(
+        pd.notnull(df),
+        None
+    )
+
+    # ---------------------------------------------------------
+    # 6. Ensure Location exists
+    # ---------------------------------------------------------
+
+    if "Location" not in df.columns:
+        df["Location"] = "Godown"
+
+    else:
+
+        def _fix_location(value):
+
+            if value is None:
+                return "Godown"
+
+            try:
+                if pd.isna(value):
+                    return "Godown"
+            except Exception:
+                pass
+
+            if isinstance(value, str):
+
+                value = value.strip()
+
+                if not value:
+                    return "Godown"
+
+            return str(value)
+
+        df["Location"] = df["Location"].map(
+            _fix_location
+        )
+
+    # ---------------------------------------------------------
+    # 7. Convert dates to ISO strings
+    # ---------------------------------------------------------
+
+    def _date_to_iso(value):
+
+        d = _to_date(value)
+
+        if d is None:
+            return None
+
+        return d.isoformat()
+
+    if "Manufacturing Date" in df.columns:
+
+        df["Manufacturing Date"] = (
+            df["Manufacturing Date"]
+            .map(_date_to_iso)
+        )
+
+    if "Stock Trasnfer Date" in df.columns:
+
+        df["Stock Trasnfer Date"] = (
+            df["Stock Trasnfer Date"]
+            .map(_date_to_iso)
+        )
+
+    # ---------------------------------------------------------
+    # 8. Build records manually
+    # ---------------------------------------------------------
+
+    raw_rows = df.to_dict(
+        orient="records"
+    )
+
+    records = []
+
+    for row in raw_rows:
+
+        def clean_value(value):
+
+            if value is None:
+                return None
+
+            try:
+                if pd.isna(value):
+                    return None
+            except Exception:
+                pass
+
+            if isinstance(value, str):
+
+                value = value.strip()
+
+                if not value:
+                    return None
+
+            return value
+
+        record = {
+
+            "Frame": clean_value(
+                row.get("Frame")
+            ),
+
+            "EngineNoMotorNo": clean_value(
+                row.get("Engine No/Motor No")
+            ),
+
+            "ModelVariant": clean_value(
+                row.get("Model Variant")
+            ),
+
+            "ProductName": clean_value(
+                row.get("Product Name")
+            ),
+
+            "Color": clean_value(
+                row.get("Color")
+            ),
+
+            "ModelName": clean_value(
+                row.get("Model Name")
+            ),
+
+            "ManufacturingDate": clean_value(
+                row.get("Manufacturing Date")
+            ),
+
+            "Location": clean_value(
+                row.get("Location")
+            ) or "Godown",
+
+            "StockTrasnferDate": clean_value(
+                row.get("Stock Trasnfer Date")
+            ),
+        }
+
+        records.append(record)
+
+    return records
+
+def _friendly_upload_error(
+    error: Exception,
+    row: int,
+    frame: str | None = None
+) -> str:
+    """
+    Converts technical database errors into messages
+    that normal users can understand.
+    """
+
+    error_text = str(error)
+
+    # ---------------------------------------------------------
+    # PostgreSQL NOT NULL
+    # ---------------------------------------------------------
+
+    if (
+        "NotNullViolation" in error_text
+        or "violates not-null constraint" in error_text
+    ):
+
+        if '"Engine No/Motor No"' in error_text:
+            return (
+                f"Row {row}: "
+                f"Engine No/Motor No is required."
+            )
+
+        if '"Frame"' in error_text:
+            return (
+                f"Row {row}: "
+                f"Frame is required."
+            )
+
+        if '"Model Variant"' in error_text:
+            return (
+                f"Row {row}: "
+                f"Model Variant is required."
+            )
+
+        if '"Product Name"' in error_text:
+            return (
+                f"Row {row}: "
+                f"Product Name is required."
+            )
+
+        if '"Model Name"' in error_text:
+            return (
+                f"Row {row}: "
+                f"Model Name is required."
+            )
+
+        if '"Color"' in error_text:
+            return (
+                f"Row {row}: "
+                f"Color is required."
+            )
+
+        if '"Manufacturing Date"' in error_text:
+            return (
+                f"Row {row}: "
+                f"Manufacturing Date is required."
+            )
+
+        if '"Location"' in error_text:
+            return (
+                f"Row {row}: "
+                f"Location is required."
+            )
+
+        return (
+            f"Row {row}: "
+            f"A required field is missing."
+        )
+
+    # ---------------------------------------------------------
+    # Unique constraint
+    # ---------------------------------------------------------
+
+    if (
+        "UniqueViolation" in error_text
+        or "duplicate key" in error_text
+    ):
+
+        if frame:
+            return (
+                f"Row {row}: "
+                f"Frame '{frame}' already exists."
+            )
+
+        return (
+            f"Row {row}: "
+            f"This record already exists."
+        )
+
+    # ---------------------------------------------------------
+    # Foreign key
+    # ---------------------------------------------------------
+
+    if "ForeignKeyViolation" in error_text:
+
+        return (
+            f"Row {row}: "
+            f"The record contains an invalid reference."
+        )
+
+    # ---------------------------------------------------------
+    # Invalid date / data
+    # ---------------------------------------------------------
+
+    if (
+        "InvalidTextRepresentation" in error_text
+        or "invalid input syntax" in error_text
+    ):
+
+        return (
+            f"Row {row}: "
+            f"One of the values has an invalid format."
+        )
+
+    # ---------------------------------------------------------
+    # String too long
+    # ---------------------------------------------------------
+
+    if (
+        "StringDataRightTruncation" in error_text
+        or "value too long" in error_text
+    ):
+
+        return (
+            f"Row {row}: "
+            f"One of the values is too long."
+        )
+
+    # ---------------------------------------------------------
+    # Generic error
+    # ---------------------------------------------------------
+
+    return (
+        f"Row {row}: "
+        f"Unable to save this record. "
+        f"Please check the entered values."
+    )
+
+# ============================================================
+# EXCEL STOCK UPLOAD
+# ============================================================
+
 @app.post("/stocks/upload-excel-binary")
 async def upload_stocks_excel_binary(
     file: UploadFile = File(...),
     admin_user: models.User = Depends(is_admin),
     db: Session = Depends(get_db),
 ):
+    """
+    Upload stock records from Excel/CSV.
+
+    Rules:
+    - Frame is required.
+    - All other fields can be empty.
+    - Empty Location becomes Godown.
+    - Duplicate Frames are skipped.
+    - Invalid rows are skipped.
+    - One failed row does NOT affect successful rows.
+    - Technical database errors are converted into user-friendly messages.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Read uploaded file
+    # ---------------------------------------------------------
+
     xlsx_bytes = await file.read()
 
+    if not xlsx_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file is empty."
+        )
+
+    # ---------------------------------------------------------
+    # 2. Parse Excel / CSV
+    # ---------------------------------------------------------
+
     try:
-        records = _excel_to_records(xlsx_bytes)
+
+        records = _excel_to_records(
+            xlsx_bytes
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse Excel: {e}")
 
-    created, skipped, errors = 0, [], []
+        print(
+            "Excel parsing error:",
+            repr(e)
+        )
 
-    for i, rec in enumerate(records, start=1):
-        try:
-            if db.query(models.Stock).filter(models.Stock.Frame == rec["Frame"]).first():
-                skipped.append({"row": i, "reason": f"Duplicate Frame '{rec['Frame']}'"})
-                continue
-
-            data = _normalize_stock_payload(rec)
-            data["StockTrasnferDate"] = date.today()
-
-            obj = models.Stock(**data)
-            db.add(obj)
-            db.flush()
-
-            _write_location_log(
-                db,
-                stock=obj,
-                actor=admin_user,
-                transfer_date_val=obj.StockTrasnferDate
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unable to read the uploaded file. "
+                "Please check that it is a valid Excel or CSV file."
             )
+        )
 
-            created += 1
+    # ---------------------------------------------------------
+    # 3. Counters
+    # ---------------------------------------------------------
+
+    created = 0
+    skipped = []
+    errors = []
+
+    # ---------------------------------------------------------
+    # 4. Process each Excel row
+    # ---------------------------------------------------------
+
+    for i, rec in enumerate(
+        records,
+        start=1
+    ):
+
+        frame = rec.get("Frame")
+
+        # -----------------------------------------------------
+        # Normalize Frame
+        # -----------------------------------------------------
+
+        if frame is not None:
+
+            frame = str(frame).strip()
+
+            if frame:
+                rec["Frame"] = frame
+            else:
+                frame = None
+                rec["Frame"] = None
+
+        # -----------------------------------------------------
+        # Frame is required
+        # -----------------------------------------------------
+
+        if not frame:
+
+            errors.append({
+                "row": i,
+                "frame": None,
+                "error": (
+                    f"Row {i}: "
+                    f"Frame number is required."
+                )
+            })
+
+            continue
+
+        # -----------------------------------------------------
+        # Process row using SAVEPOINT
+        #
+        # If this row fails, only this row is rolled back.
+        # Other successful rows remain safe.
+        # -----------------------------------------------------
+
+        try:
+
+            with db.begin_nested():
+
+                # -------------------------------------------------
+                # Duplicate Frame check
+                # -------------------------------------------------
+
+                existing = (
+                    db.query(models.Stock)
+                    .filter(
+                        models.Stock.Frame == frame
+                    )
+                    .first()
+                )
+
+                if existing:
+
+                    skipped.append({
+                        "row": i,
+                        "reason": (
+                            f"Duplicate Frame "
+                            f"'{frame}'"
+                        )
+                    })
+
+                    continue
+
+                # -------------------------------------------------
+                # Normalize data
+                # -------------------------------------------------
+
+                data = _normalize_stock_payload(
+                    rec
+                )
+
+                # -------------------------------------------------
+                # Location default
+                # -------------------------------------------------
+
+                if not data.get("Location"):
+
+                    data["Location"] = "Godown"
+
+                # -------------------------------------------------
+                # Upload transfer date
+                # -------------------------------------------------
+
+                data["StockTrasnferDate"] = date.today()
+
+                # -------------------------------------------------
+                # Create stock
+                # -------------------------------------------------
+
+                obj = models.Stock(
+                    **data
+                )
+
+                db.add(obj)
+
+                # Force INSERT now so database errors
+                # happen inside this savepoint.
+                db.flush()
+
+                # -------------------------------------------------
+                # Location history
+                # -------------------------------------------------
+
+                _write_location_log(
+                    db,
+                    stock=obj,
+                    actor=admin_user,
+                    transfer_date_val=(
+                        obj.StockTrasnferDate
+                    )
+                )
+
+                created += 1
 
         except Exception as e:
-            errors.append({"row": i, "error": str(e)})
 
-    _write_audit(
-        db,
-        actor=admin_user,
-        action="upload",
-        count=created,
-        details=f"Excel upload: created={created}, skipped={len(skipped)}, errors={len(errors)}"
-    )
+            # -----------------------------------------------------
+            # Technical error goes to server log
+            # -----------------------------------------------------
 
-    db.commit()
+            print(
+                f"Excel upload error | "
+                f"Row={i} | "
+                f"Frame={frame} | "
+                f"Error={repr(e)}"
+            )
+
+            # -----------------------------------------------------
+            # User-friendly error
+            # -----------------------------------------------------
+
+            errors.append({
+                "row": i,
+                "frame": frame,
+                "error": _friendly_upload_error(
+                    error=e,
+                    row=i,
+                    frame=frame
+                )
+            })
+
+            # -----------------------------------------------------
+            # Continue processing next row
+            # -----------------------------------------------------
+
+            continue
+
+    # ---------------------------------------------------------
+    # 5. Audit log
+    # ---------------------------------------------------------
+
+    try:
+
+        _write_audit(
+            db,
+            actor=admin_user,
+            action="upload",
+            count=created,
+            details=(
+                "Excel upload: "
+                f"created={created}, "
+                f"skipped={len(skipped)}, "
+                f"errors={len(errors)}"
+            )
+        )
+
+        # -----------------------------------------------------
+        # 6. Commit all successful rows
+        # -----------------------------------------------------
+
+        db.commit()
+
+    except Exception as e:
+
+        db.rollback()
+
+        print(
+            "Excel upload final commit error:",
+            repr(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "The upload could not be completed. "
+                "Please try again."
+            )
+        )
+
+    # ---------------------------------------------------------
+    # 7. User-friendly response
+    # ---------------------------------------------------------
 
     return {
+        "message": "Excel upload completed.",
         "created": created,
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
         "skipped": skipped,
         "errors": errors
     }
 
 
-
-# @app.get("/delivered", response_model=schemas.DeliveredList, tags=["delivered"])
-# def list_delivered(
-#     delivered_date: Optional[date] = Query(default=None, description="Filter by exact date YYYY-MM-DD"),
-#     date_from: Optional[date] = Query(default=None, description="Filter range start date"),
-#     date_to: Optional[date] = Query(default=None, description="Filter range end date"),
-#     page: int = Query(1, ge=1),
-#     limit: int = Query(20, ge=1, le=100),
-#     db: Session = Depends(get_db),
-#     admin_user: models.User = Depends(is_admin),
-# ):
-#     q = db.query(models.Delivered)
-
-#     if delivered_date:
-#         start = datetime.combine(delivered_date, datetime.min.time(), tzinfo=timezone.utc)
-#         end = datetime.combine(delivered_date, datetime.max.time(), tzinfo=timezone.utc)
-#         q = q.filter(
-#             models.Delivered.DeliveredDateTime >= start,
-#             models.Delivered.DeliveredDateTime <= end
-#         )
-#     else:
-#         if date_from:
-#             start = datetime.combine(date_from, datetime.min.time(), tzinfo=timezone.utc)
-#             q = q.filter(models.Delivered.DeliveredDateTime >= start)
-#         if date_to:
-#             end = datetime.combine(date_to, datetime.max.time(), tzinfo=timezone.utc)
-#             q = q.filter(models.Delivered.DeliveredDateTime <= end)
-
-#     filtered_total = q.count()
-
-#     records = (
-#         q.order_by(models.Delivered.DeliveredDateTime.desc())
-#         .offset((page - 1) * limit)
-#         .limit(limit)
-#         .all()
-#     )
-
-#     # --- Summary counts (independent of the date filters above) ---
-#     now = datetime.now(timezone.utc)
-#     today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
-#     today_end = datetime.combine(now.date(), datetime.max.time(), tzinfo=timezone.utc)
-#     month_start = datetime.combine(now.date().replace(day=1), datetime.min.time(), tzinfo=timezone.utc)
-
-#     total_delivered = db.query(models.Delivered).count()
-
-#     today_delivered = (
-#         db.query(models.Delivered)
-#         .filter(
-#             models.Delivered.DeliveredDateTime >= today_start,
-#             models.Delivered.DeliveredDateTime <= today_end,
-#         )
-#         .count()
-#     )
-
-#     month_delivered = (
-#         db.query(models.Delivered)
-#         .filter(models.Delivered.DeliveredDateTime >= month_start)
-#         .count()
-#     )
-
-#     return {
-#         "total_delivered": total_delivered,      # all-time total (unaffected by filters/pagination)
-#         "today_delivered": today_delivered,
-#         "month_delivered": month_delivered,
-#         "filtered_total": filtered_total,         # count matching the applied date filters, if any
-#         "items": records
-#     }
 
 @app.get("/delivered", response_model=schemas.DeliveredList, tags=["delivered"])
 def list_delivered(
@@ -1446,48 +2122,6 @@ def get_location_log_simple(
 
 from fastapi import Query
 
-# @app.get("/audit_logs", tags=["audit"])
-# def get_audit_logs(
-#     admin_user: Annotated[models.User, Depends(is_admin)],
-#     db: Session = Depends(get_db),
-#     page: int = Query(1, ge=1),
-#     limit: int = Query(20, ge=1, le=100)
-# ):
-#     """
-#     Returns simplified audit entries:
-#       - username
-#       - done_by (First Last if available, else username)
-#       - role of the user who performed the action
-#       - action, count, frame, details, at
-#     """
-
-#     offset = (page - 1) * limit
-
-#     logs = (
-#         db.query(models.AuditLog)
-#         .order_by(models.AuditLog.at.desc())
-#         .offset(offset)
-#         .limit(limit)
-#         .all()
-#     )
-
-#     out = []
-#     for l in logs:
-#         full_name = f"{(l.actor_first_name or '').strip()} {(l.actor_last_name or '').strip()}".strip()
-#         done_by = full_name if full_name else (l.actor_username or "")
-
-#         out.append({
-#             "action": l.action,
-#             "count": l.count,
-#             "frame": l.frame,
-#             "details": l.details,
-#             "username": l.actor_username,
-#             "done_by": done_by,
-#             "role": l.actor_role,
-#             "at": l.at,
-#         })
-
-#     return out
 
 @app.get("/audit_logs", tags=["audit"])
 def get_audit_logs(
