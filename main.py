@@ -417,11 +417,6 @@ def create_user(
     db.refresh(db_user)
     return db_user
 
-# @app.get("/get_users", response_model=List[schemas.User])
-# def read_all_users(admin_user: Annotated[models.User, Depends(is_admin)], db: Session = Depends(get_db)):
-#     """Retrieves all user records."""
-#     users = db.query(models.User).all()
-#     return users
 
 @app.get("/get_users", response_model=List[schemas.User])
 def read_all_users(
@@ -585,78 +580,264 @@ INVENTORY_LOCATIONS = [
 
 
 
+# @app.get(
+#     "/stocks",
+#     response_model=schemas.StockSummary,
+#     tags=["stocks"]
+# )
+# def get_stocks(
+#     bucket: str = Query(default="all", description="one of: all or a specific location name"),
+#     search: Optional[str] = Query(default=None, description="Search by Frame, Engine/Motor No, Product, Model, Color, or Location"),
+#     page: int = Query(1, ge=1),
+#     limit: int = Query(20, ge=1, le=100),
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(get_current_user),
+# ):
+#     total_remaining = db.query(models.Stock).count()
+
+#     # Base query used for the location breakdown — reflects search, NOT bucket,
+#     # so the breakdown stays meaningful regardless of which bucket is selected.
+#     breakdown_query = db.query(models.Stock)
+#     if search and search.strip():
+#         term = f"%{search.strip()}%"
+#         breakdown_query = breakdown_query.filter(
+#             or_(
+#                 models.Stock.Frame.ilike(term),
+#                 models.Stock.EngineNoMotorNo.ilike(term),
+#                 models.Stock.ModelVariant.ilike(term),
+#                 models.Stock.ProductName.ilike(term),
+#                 models.Stock.ModelName.ilike(term),
+#                 models.Stock.Color.ilike(term),
+#                 models.Stock.Location.ilike(term),
+#             )
+#         )
+#     breakdown_total = breakdown_query.count()
+
+#     summary_items = []
+#     for loc in INVENTORY_LOCATIONS:
+#         # case/whitespace-insensitive match so stray casing doesn't drop rows from every bucket
+#         c = breakdown_query.filter(
+#             func.lower(func.trim(models.Stock.Location)) == loc.lower()
+#         ).count()
+#         percentage = round((c / breakdown_total * 100), 2) if breakdown_total else 0
+#         summary_items.append(
+#             schemas.StockSummaryItem(location=loc, count=c, percentage=percentage)
+#         )
+
+#     # Query used for the actual returned rows — applies both bucket and search
+#     query = db.query(models.Stock)
+
+#     norm_bucket = bucket.strip().lower()
+#     if norm_bucket != "all":
+#         for loc in INVENTORY_LOCATIONS:
+#             if norm_bucket == loc.lower():
+#                 query = query.filter(
+#                     func.lower(func.trim(models.Stock.Location)) == loc.lower()
+#                 )
+#                 break
+
+#     if search and search.strip():
+#         term = f"%{search.strip()}%"
+#         query = query.filter(
+#             or_(
+#                 models.Stock.Frame.ilike(term),
+#                 models.Stock.EngineNoMotorNo.ilike(term),
+#                 models.Stock.ModelVariant.ilike(term),
+#                 models.Stock.ProductName.ilike(term),
+#                 models.Stock.ModelName.ilike(term),
+#                 models.Stock.Color.ilike(term),
+#                 models.Stock.Location.ilike(term),
+#             )
+#         )
+
+#     filtered_total = query.count()
+
+#     stock_list = (
+#         query
+#         .order_by(models.Stock.id.desc())
+#         .offset((page - 1) * limit)
+#         .limit(limit)
+#         .all()
+#     )
+
+#     return {
+#         "total_remaining": total_remaining,
+#         "filtered_total": filtered_total,
+#         "by_location": summary_items,
+#         "stocks": stock_list
+#     }
+
+
 @app.get(
     "/stocks",
     response_model=schemas.StockSummary,
     tags=["stocks"]
 )
 def get_stocks(
-    bucket: str = Query(default="all", description="one of: all or a specific location name"),
-    search: Optional[str] = Query(default=None, description="Search by Frame, Engine/Motor No, Product, Model, Color, or Location"),
+    bucket: str = Query(
+        default="all",
+        description="one of: all or a specific location name"
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        description="Search by Frame, Engine/Motor No, Product, Model, Color, or Location"
+    ),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    # ---------------------------------------------------------
+    # TOTAL STOCK
+    # ---------------------------------------------------------
     total_remaining = db.query(models.Stock).count()
 
-    # Base query used for the location breakdown — reflects search, NOT bucket,
-    # so the breakdown stays meaningful regardless of which bucket is selected.
-    breakdown_query = db.query(models.Stock)
+    # ---------------------------------------------------------
+    # SPACE-INSENSITIVE SEARCH
+    #
+    # Example:
+    # Database: "P S BLUE"
+    #
+    # Searches that will match:
+    # "P S BLUE"
+    # "PS BLUE"
+    # "PSBLUE"
+    # "p s blue"
+    # "P  S  BLUE"
+    #
+    # regexp_replace removes ALL whitespace characters.
+    # ---------------------------------------------------------
+    search_term = None
+
     if search and search.strip():
-        term = f"%{search.strip()}%"
+        # Remove all spaces/whitespace from user's search
+        search_value = "".join(search.split()).lower()
+
+        if search_value:
+            search_term = f"%{search_value}%"
+
+    # ---------------------------------------------------------
+    # HELPER FOR SPACE-INSENSITIVE DATABASE SEARCH
+    # ---------------------------------------------------------
+    def normalized_search(column):
+        return func.regexp_replace(
+            func.lower(column),
+            r"\s+",
+            "",
+            "g"
+        )
+
+    # ---------------------------------------------------------
+    # LOCATION BREAKDOWN
+    #
+    # This uses SEARCH but does NOT use the selected bucket.
+    # Therefore the location summary remains meaningful.
+    # ---------------------------------------------------------
+    breakdown_query = db.query(models.Stock)
+
+    if search_term:
         breakdown_query = breakdown_query.filter(
             or_(
-                models.Stock.Frame.ilike(term),
-                models.Stock.EngineNoMotorNo.ilike(term),
-                models.Stock.ModelVariant.ilike(term),
-                models.Stock.ProductName.ilike(term),
-                models.Stock.ModelName.ilike(term),
-                models.Stock.Color.ilike(term),
-                models.Stock.Location.ilike(term),
+                normalized_search(models.Stock.Frame).ilike(search_term),
+                normalized_search(models.Stock.EngineNoMotorNo).ilike(search_term),
+                normalized_search(models.Stock.ModelVariant).ilike(search_term),
+                normalized_search(models.Stock.ProductName).ilike(search_term),
+                normalized_search(models.Stock.ModelName).ilike(search_term),
+                normalized_search(models.Stock.Color).ilike(search_term),
+                normalized_search(models.Stock.Location).ilike(search_term),
             )
         )
+
     breakdown_total = breakdown_query.count()
 
+    # ---------------------------------------------------------
+    # LOCATION SUMMARY
+    # ---------------------------------------------------------
     summary_items = []
+
     for loc in INVENTORY_LOCATIONS:
-        # case/whitespace-insensitive match so stray casing doesn't drop rows from every bucket
+
         c = breakdown_query.filter(
-            func.lower(func.trim(models.Stock.Location)) == loc.lower()
+            func.lower(
+                func.trim(models.Stock.Location)
+            ) == loc.lower()
         ).count()
-        percentage = round((c / breakdown_total * 100), 2) if breakdown_total else 0
-        summary_items.append(
-            schemas.StockSummaryItem(location=loc, count=c, percentage=percentage)
+
+        percentage = (
+            round((c / breakdown_total * 100), 2)
+            if breakdown_total
+            else 0
         )
 
-    # Query used for the actual returned rows — applies both bucket and search
-    query = db.query(models.Stock)
-
-    norm_bucket = bucket.strip().lower()
-    if norm_bucket != "all":
-        for loc in INVENTORY_LOCATIONS:
-            if norm_bucket == loc.lower():
-                query = query.filter(
-                    func.lower(func.trim(models.Stock.Location)) == loc.lower()
-                )
-                break
-
-    if search and search.strip():
-        term = f"%{search.strip()}%"
-        query = query.filter(
-            or_(
-                models.Stock.Frame.ilike(term),
-                models.Stock.EngineNoMotorNo.ilike(term),
-                models.Stock.ModelVariant.ilike(term),
-                models.Stock.ProductName.ilike(term),
-                models.Stock.ModelName.ilike(term),
-                models.Stock.Color.ilike(term),
-                models.Stock.Location.ilike(term),
+        summary_items.append(
+            schemas.StockSummaryItem(
+                location=loc,
+                count=c,
+                percentage=percentage
             )
         )
 
+    # ---------------------------------------------------------
+    # MAIN STOCK QUERY
+    # ---------------------------------------------------------
+    query = db.query(models.Stock)
+
+    # ---------------------------------------------------------
+    # BUCKET / LOCATION FILTER
+    # ---------------------------------------------------------
+    norm_bucket = bucket.strip().lower()
+
+    if norm_bucket != "all":
+
+        for loc in INVENTORY_LOCATIONS:
+
+            if norm_bucket == loc.lower():
+
+                query = query.filter(
+                    func.lower(
+                        func.trim(models.Stock.Location)
+                    ) == loc.lower()
+                )
+
+                break
+
+    # ---------------------------------------------------------
+    # SEARCH FILTER
+    #
+    # IMPORTANT:
+    # Database value:
+    #     "P S BLUE"
+    #
+    # User can search:
+    #     "PSBLUE"
+    #
+    # Both become:
+    #     "psblue"
+    #
+    # before comparison.
+    # ---------------------------------------------------------
+    if search_term:
+
+        query = query.filter(
+            or_(
+                normalized_search(models.Stock.Frame).ilike(search_term),
+                normalized_search(models.Stock.EngineNoMotorNo).ilike(search_term),
+                normalized_search(models.Stock.ModelVariant).ilike(search_term),
+                normalized_search(models.Stock.ProductName).ilike(search_term),
+                normalized_search(models.Stock.ModelName).ilike(search_term),
+                normalized_search(models.Stock.Color).ilike(search_term),
+                normalized_search(models.Stock.Location).ilike(search_term),
+            )
+        )
+
+    # ---------------------------------------------------------
+    # FILTERED TOTAL
+    # ---------------------------------------------------------
     filtered_total = query.count()
 
+    # ---------------------------------------------------------
+    # PAGINATION
+    # ---------------------------------------------------------
     stock_list = (
         query
         .order_by(models.Stock.id.desc())
@@ -665,6 +846,9 @@ def get_stocks(
         .all()
     )
 
+    # ---------------------------------------------------------
+    # RESPONSE
+    # ---------------------------------------------------------
     return {
         "total_remaining": total_remaining,
         "filtered_total": filtered_total,
@@ -2012,52 +2196,218 @@ async def upload_stocks_excel_binary(
 
 
 
-@app.get("/delivered", response_model=schemas.DeliveredList, tags=["delivered"])
+# @app.get("/delivered", response_model=schemas.DeliveredList, tags=["delivered"])
+# def list_delivered(
+#     search: Optional[str] = Query(default=None, description="Search by Frame, Engine/Motor No, Product, Model, or Color"),
+#     delivered_date: Optional[date] = Query(default=None, description="Filter by exact date YYYY-MM-DD"),
+#     date_from: Optional[date] = Query(default=None, description="Filter range start date"),
+#     date_to: Optional[date] = Query(default=None, description="Filter range end date"),
+#     page: int = Query(1, ge=1),
+#     limit: int = Query(20, ge=1, le=100),
+#     db: Session = Depends(get_db)
+#     #admin_user: models.User = Depends(is_admin),
+# ):
+#     q = db.query(models.Delivered)
+
+#     # --- date filters, now interpreted as IST calendar days ---
+#     if delivered_date:
+#         start = datetime.combine(delivered_date, datetime.min.time())
+#         end = datetime.combine(delivered_date, datetime.max.time())
+#         q = q.filter(
+#             models.Delivered.DeliveredDateTime >= start,
+#             models.Delivered.DeliveredDateTime <= end
+#             )
+#     else:
+#         if date_from:
+#             start = datetime.combine(date_from, datetime.min.time())
+#             q = q.filter(models.Delivered.DeliveredDateTime >= start)
+#             if date_to:
+#                 end = datetime.combine(date_to, datetime.max.time())
+#                 q = q.filter(models.Delivered.DeliveredDateTime <= end)
+
+#     if search and search.strip():
+#         term = f"%{search.strip()}%"
+#         q = q.filter(
+#             or_(
+#                 models.Delivered.Frame.ilike(term),
+#                 models.Delivered.EngineNoMotorNo.ilike(term),
+#                 models.Delivered.ModelVariant.ilike(term),
+#                 models.Delivered.ProductName.ilike(term),
+#                 models.Delivered.ModelName.ilike(term),
+#                 models.Delivered.Color.ilike(term),
+#             )
+#         )
+
+#     filtered_total = q.count()
+
+#     records = (
+#         q.order_by(models.Delivered.DeliveredDateTime.desc())
+#         .offset((page - 1) * limit)
+#         .limit(limit)
+#         .all()
+#     )
+
+#     # --- summary counts, now using IST "today" / "this month" ---
+#     now = datetime.now(IST).replace(tzinfo=None)
+#     today_start = datetime.combine(now.date(), datetime.min.time())
+#     today_end = datetime.combine(now.date(), datetime.max.time())
+#     month_start = datetime.combine(now.date().replace(day=1), datetime.min.time())
+
+#     total_delivered = db.query(models.Delivered).count()
+
+#     today_delivered = (
+#         db.query(models.Delivered)
+#         .filter(
+#             models.Delivered.DeliveredDateTime >= today_start,
+#             models.Delivered.DeliveredDateTime <= today_end,
+#         )
+#         .count()
+#     )
+
+#     month_delivered = (
+#         db.query(models.Delivered)
+#         .filter(models.Delivered.DeliveredDateTime >= month_start)
+#         .count()
+#     )
+
+#     return {
+#         "total_delivered": total_delivered,
+#         "today_delivered": today_delivered,
+#         "month_delivered": month_delivered,
+#         "filtered_total": filtered_total,
+#         "items": records
+#     }
+
+
+@app.get(
+    "/delivered",
+    response_model=schemas.DeliveredList,
+    tags=["delivered"]
+)
 def list_delivered(
-    search: Optional[str] = Query(default=None, description="Search by Frame, Engine/Motor No, Product, Model, or Color"),
-    delivered_date: Optional[date] = Query(default=None, description="Filter by exact date YYYY-MM-DD"),
-    date_from: Optional[date] = Query(default=None, description="Filter range start date"),
-    date_to: Optional[date] = Query(default=None, description="Filter range end date"),
+    search: Optional[str] = Query(
+        default=None,
+        description="Search by Frame, Engine/Motor No, Product, Model, or Color"
+    ),
+    delivered_date: Optional[date] = Query(
+        default=None,
+        description="Filter by exact date YYYY-MM-DD"
+    ),
+    date_from: Optional[date] = Query(
+        default=None,
+        description="Filter range start date"
+    ),
+    date_to: Optional[date] = Query(
+        default=None,
+        description="Filter range end date"
+    ),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db)
-    #admin_user: models.User = Depends(is_admin),
+    # admin_user: models.User = Depends(is_admin),
 ):
     q = db.query(models.Delivered)
 
     # --- date filters, now interpreted as IST calendar days ---
     if delivered_date:
-        start = datetime.combine(delivered_date, datetime.min.time())
-        end = datetime.combine(delivered_date, datetime.max.time())
+        start = datetime.combine(
+            delivered_date,
+            datetime.min.time()
+        )
+        end = datetime.combine(
+            delivered_date,
+            datetime.max.time()
+        )
+
         q = q.filter(
             models.Delivered.DeliveredDateTime >= start,
             models.Delivered.DeliveredDateTime <= end
-            )
+        )
+
     else:
         if date_from:
-            start = datetime.combine(date_from, datetime.min.time())
-            q = q.filter(models.Delivered.DeliveredDateTime >= start)
-            if date_to:
-                end = datetime.combine(date_to, datetime.max.time())
-                q = q.filter(models.Delivered.DeliveredDateTime <= end)
+            start = datetime.combine(
+                date_from,
+                datetime.min.time()
+            )
+            q = q.filter(
+                models.Delivered.DeliveredDateTime >= start
+            )
 
+        if date_to:
+            end = datetime.combine(
+                date_to,
+                datetime.max.time()
+            )
+            q = q.filter(
+                models.Delivered.DeliveredDateTime <= end
+            )
+
+    # ---------------------------------------------------------
+    # SEARCH
+    # Case-insensitive + space-insensitive
+    #
+    # Example:
+    # Database: "P S BLUE"
+    #
+    # These searches will all match:
+    # "P S BLUE"
+    # "PS BLUE"
+    # "PSBLUE"
+    # "p s blue"
+    # "P  S  BLUE"
+    # ---------------------------------------------------------
     if search and search.strip():
-        term = f"%{search.strip()}%"
+
+        # Remove all whitespace from user's search
+        search_value = "".join(search.split()).lower()
+
+        term = f"%{search_value}%"
+
+        # Remove all whitespace from database values
+        def normalized_search(column):
+            return func.regexp_replace(
+                func.lower(column),
+                r"\s+",
+                "",
+                "g"
+            )
+
         q = q.filter(
             or_(
-                models.Delivered.Frame.ilike(term),
-                models.Delivered.EngineNoMotorNo.ilike(term),
-                models.Delivered.ModelVariant.ilike(term),
-                models.Delivered.ProductName.ilike(term),
-                models.Delivered.ModelName.ilike(term),
-                models.Delivered.Color.ilike(term),
+                normalized_search(
+                    models.Delivered.Frame
+                ).ilike(term),
+
+                normalized_search(
+                    models.Delivered.EngineNoMotorNo
+                ).ilike(term),
+
+                normalized_search(
+                    models.Delivered.ModelVariant
+                ).ilike(term),
+
+                normalized_search(
+                    models.Delivered.ProductName
+                ).ilike(term),
+
+                normalized_search(
+                    models.Delivered.ModelName
+                ).ilike(term),
+
+                normalized_search(
+                    models.Delivered.Color
+                ).ilike(term),
             )
         )
 
     filtered_total = q.count()
 
     records = (
-        q.order_by(models.Delivered.DeliveredDateTime.desc())
+        q
+        .order_by(
+            models.Delivered.DeliveredDateTime.desc()
+        )
         .offset((page - 1) * limit)
         .limit(limit)
         .all()
@@ -2065,11 +2415,25 @@ def list_delivered(
 
     # --- summary counts, now using IST "today" / "this month" ---
     now = datetime.now(IST).replace(tzinfo=None)
-    today_start = datetime.combine(now.date(), datetime.min.time())
-    today_end = datetime.combine(now.date(), datetime.max.time())
-    month_start = datetime.combine(now.date().replace(day=1), datetime.min.time())
 
-    total_delivered = db.query(models.Delivered).count()
+    today_start = datetime.combine(
+        now.date(),
+        datetime.min.time()
+    )
+
+    today_end = datetime.combine(
+        now.date(),
+        datetime.max.time()
+    )
+
+    month_start = datetime.combine(
+        now.date().replace(day=1),
+        datetime.min.time()
+    )
+
+    total_delivered = (
+        db.query(models.Delivered).count()
+    )
 
     today_delivered = (
         db.query(models.Delivered)
@@ -2082,7 +2446,9 @@ def list_delivered(
 
     month_delivered = (
         db.query(models.Delivered)
-        .filter(models.Delivered.DeliveredDateTime >= month_start)
+        .filter(
+            models.Delivered.DeliveredDateTime >= month_start
+        )
         .count()
     )
 
@@ -2123,30 +2489,134 @@ def get_location_log_simple(
 from fastapi import Query
 
 
+# @app.get("/audit_logs", tags=["audit"])
+# def get_audit_logs(
+#     #admin_user: Annotated[models.User, Depends(is_admin)],
+#     db: Session = Depends(get_db),
+#     search: Optional[str] = Query(default=None, description="Search by username, actor name, action, frame, or details"),
+#     page: int = Query(1, ge=1),
+#     limit: int = Query(20, ge=1, le=100),
+# ):
+#     query = db.query(models.AuditLog)
+
+#     if search and search.strip():
+#         term = f"%{search.strip()}%"
+#         query = query.filter(
+#             or_(
+#                 models.AuditLog.actor_username.ilike(term),
+#                 models.AuditLog.actor_first_name.ilike(term),
+#                 models.AuditLog.actor_last_name.ilike(term),
+#                 models.AuditLog.action.ilike(term),
+#                 models.AuditLog.frame.ilike(term),
+#                 models.AuditLog.details.ilike(term),
+#             )
+#         )
+
+#     filtered_total = query.count()
+#     offset = (page - 1) * limit
+
+#     logs = (
+#         query
+#         .order_by(models.AuditLog.at.desc())
+#         .offset(offset)
+#         .limit(limit)
+#         .all()
+#     )
+
+#     out = []
+#     for l in logs:
+#         full_name = f"{(l.actor_first_name or '').strip()} {(l.actor_last_name or '').strip()}".strip()
+#         done_by = full_name if full_name else (l.actor_username or "")
+#         out.append({
+#             "action": l.action,
+#             "count": l.count,
+#             "frame": l.frame,
+#             "details": l.details,
+#             "username": l.actor_username,
+#             "done_by": done_by,
+#             "role": l.actor_role,
+#             "at": l.at,
+#         })
+
+#     return {
+#         "filtered_total": filtered_total,
+#         "page": page,
+#         "limit": limit,
+#         "items": out,
+#     }
+
 @app.get("/audit_logs", tags=["audit"])
 def get_audit_logs(
-    #admin_user: Annotated[models.User, Depends(is_admin)],
+    # admin_user: Annotated[models.User, Depends(is_admin)],
     db: Session = Depends(get_db),
-    search: Optional[str] = Query(default=None, description="Search by username, actor name, action, frame, or details"),
+    search: Optional[str] = Query(
+        default=None,
+        description="Search by username, actor name, action, frame, or details"
+    ),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
 ):
     query = db.query(models.AuditLog)
 
+    # ---------------------------------------------------------
+    # SEARCH
+    # Case-insensitive + space-insensitive
+    #
+    # Example:
+    # Database: "P S BLUE"
+    #
+    # These searches will all match:
+    # "P S BLUE"
+    # "PS BLUE"
+    # "PSBLUE"
+    # "p s blue"
+    # "P  S  BLUE"
+    # ---------------------------------------------------------
     if search and search.strip():
-        term = f"%{search.strip()}%"
+
+        # Remove all whitespace from user's search
+        search_value = "".join(search.split()).lower()
+        term = f"%{search_value}%"
+
+        # Remove all whitespace from database values
+        def normalized_search(column):
+            return func.regexp_replace(
+                func.lower(column),
+                r"\s+",
+                "",
+                "g"
+            )
+
         query = query.filter(
             or_(
-                models.AuditLog.actor_username.ilike(term),
-                models.AuditLog.actor_first_name.ilike(term),
-                models.AuditLog.actor_last_name.ilike(term),
-                models.AuditLog.action.ilike(term),
-                models.AuditLog.frame.ilike(term),
-                models.AuditLog.details.ilike(term),
+                normalized_search(
+                    models.AuditLog.actor_username
+                ).ilike(term),
+
+                normalized_search(
+                    models.AuditLog.actor_first_name
+                ).ilike(term),
+
+                normalized_search(
+                    models.AuditLog.actor_last_name
+                ).ilike(term),
+
+                normalized_search(
+                    models.AuditLog.action
+                ).ilike(term),
+
+                normalized_search(
+                    models.AuditLog.frame
+                ).ilike(term),
+
+                normalized_search(
+                    models.AuditLog.details
+                ).ilike(term),
             )
         )
 
     filtered_total = query.count()
+
     offset = (page - 1) * limit
 
     logs = (
@@ -2158,9 +2628,16 @@ def get_audit_logs(
     )
 
     out = []
+
     for l in logs:
-        full_name = f"{(l.actor_first_name or '').strip()} {(l.actor_last_name or '').strip()}".strip()
+
+        full_name = (
+            f"{(l.actor_first_name or '').strip()} "
+            f"{(l.actor_last_name or '').strip()}"
+        ).strip()
+
         done_by = full_name if full_name else (l.actor_username or "")
+
         out.append({
             "action": l.action,
             "count": l.count,
