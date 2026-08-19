@@ -2592,9 +2592,39 @@ def _write_location_log(
     db.add(log)
  
 
+# def _move_stock_to_delivered(db: Session, stock: models.Stock, actor: models.User) -> models.Delivered:
+#     existing = db.query(models.Delivered).filter(models.Delivered.Frame == stock.Frame).first()
+#     if existing:
+#         db.delete(stock)
+#         return existing
+
+#     delivered_row = models.Delivered(
+#         Frame=stock.Frame,
+#         EngineNoMotorNo=stock.EngineNoMotorNo,
+#         ModelVariant=stock.ModelVariant,
+#         ProductName=stock.ProductName,
+#         Color=stock.Color,
+#         ModelName=stock.ModelName,
+#         ManufacturingDate=stock.ManufacturingDate,
+#         Location=stock.Location,
+#         DeliveredDateTime=datetime.now(IST).replace(tzinfo=None),
+#     )
+#     db.add(delivered_row)
+#     db.delete(stock)
+#     return delivered_row
+
 def _move_stock_to_delivered(db: Session, stock: models.Stock, actor: models.User) -> models.Delivered:
     existing = db.query(models.Delivered).filter(models.Delivered.Frame == stock.Frame).first()
     if existing:
+        # Update the existing Delivered record instead of silently keeping stale data
+        existing.EngineNoMotorNo = stock.EngineNoMotorNo
+        existing.ModelVariant = stock.ModelVariant
+        existing.ProductName = stock.ProductName
+        existing.Color = stock.Color
+        existing.ModelName = stock.ModelName
+        existing.ManufacturingDate = stock.ManufacturingDate
+        existing.Location = stock.Location
+        existing.DeliveredDateTime = datetime.now(IST).replace(tzinfo=None)
         db.delete(stock)
         return existing
 
@@ -4556,188 +4586,6 @@ async def upload_stocks_excel_binary(
         "errors": errors
     }
 
-
-
-# @app.get(
-#     "/delivered",
-#     response_model=schemas.DeliveredList,
-#     tags=["delivered"]
-# )
-# def list_delivered(
-#     search: Optional[str] = Query(
-#         default=None,
-#         description="Search by Frame, Engine/Motor No, Product, Model, or Color"
-#     ),
-#     delivered_date: Optional[date] = Query(
-#         default=None,
-#         description="Filter by exact date YYYY-MM-DD"
-#     ),
-#     date_from: Optional[date] = Query(
-#         default=None,
-#         description="Filter range start date"
-#     ),
-#     date_to: Optional[date] = Query(
-#         default=None,
-#         description="Filter range end date"
-#     ),
-#     page: int = Query(1, ge=1),
-#     limit: int = Query(20, ge=1, le=100),
-#     db: Session = Depends(get_db)
-#     # admin_user: models.User = Depends(is_admin),
-# ):
-#     q = db.query(models.Delivered)
-
-#     # --- date filters, now interpreted as IST calendar days ---
-#     if delivered_date:
-#         start = datetime.combine(
-#             delivered_date,
-#             datetime.min.time()
-#         )
-#         end = datetime.combine(
-#             delivered_date,
-#             datetime.max.time()
-#         )
-
-#         q = q.filter(
-#             models.Delivered.DeliveredDateTime >= start,
-#             models.Delivered.DeliveredDateTime <= end
-#         )
-
-#     else:
-#         if date_from:
-#             start = datetime.combine(
-#                 date_from,
-#                 datetime.min.time()
-#             )
-#             q = q.filter(
-#                 models.Delivered.DeliveredDateTime >= start
-#             )
-
-#         if date_to:
-#             end = datetime.combine(
-#                 date_to,
-#                 datetime.max.time()
-#             )
-#             q = q.filter(
-#                 models.Delivered.DeliveredDateTime <= end
-#             )
-
-#     # ---------------------------------------------------------
-#     # SEARCH
-#     # Case-insensitive + space-insensitive
-#     #
-#     # Example:
-#     # Database: "P S BLUE"
-#     #
-#     # These searches will all match:
-#     # "P S BLUE"
-#     # "PS BLUE"
-#     # "PSBLUE"
-#     # "p s blue"
-#     # "P  S  BLUE"
-#     # ---------------------------------------------------------
-#     if search and search.strip():
-
-#         # Remove all whitespace from user's search
-#         search_value = "".join(search.split()).lower()
-
-#         term = f"%{search_value}%"
-
-#         # Remove all whitespace from database values
-#         def normalized_search(column):
-#             return func.regexp_replace(
-#                 func.lower(column),
-#                 r"\s+",
-#                 "",
-#                 "g"
-#             )
-
-#         q = q.filter(
-#             or_(
-#                 normalized_search(
-#                     models.Delivered.Frame
-#                 ).ilike(term),
-
-#                 normalized_search(
-#                     models.Delivered.EngineNoMotorNo
-#                 ).ilike(term),
-
-#                 normalized_search(
-#                     models.Delivered.ModelVariant
-#                 ).ilike(term),
-
-#                 normalized_search(
-#                     models.Delivered.ProductName
-#                 ).ilike(term),
-
-#                 normalized_search(
-#                     models.Delivered.ModelName
-#                 ).ilike(term),
-
-#                 normalized_search(
-#                     models.Delivered.Color
-#                 ).ilike(term),
-#             )
-#         )
-
-#     filtered_total = q.count()
-
-#     records = (
-#         q
-#         .order_by(
-#             models.Delivered.DeliveredDateTime.desc()
-#         )
-#         .offset((page - 1) * limit)
-#         .limit(limit)
-#         .all()
-#     )
-
-#     # --- summary counts, now using IST "today" / "this month" ---
-#     now = datetime.now(IST).replace(tzinfo=None)
-
-#     today_start = datetime.combine(
-#         now.date(),
-#         datetime.min.time()
-#     )
-
-#     today_end = datetime.combine(
-#         now.date(),
-#         datetime.max.time()
-#     )
-
-#     month_start = datetime.combine(
-#         now.date().replace(day=1),
-#         datetime.min.time()
-#     )
-
-#     total_delivered = (
-#         db.query(models.Delivered).count()
-#     )
-
-#     today_delivered = (
-#         db.query(models.Delivered)
-#         .filter(
-#             models.Delivered.DeliveredDateTime >= today_start,
-#             models.Delivered.DeliveredDateTime <= today_end,
-#         )
-#         .count()
-#     )
-
-#     month_delivered = (
-#         db.query(models.Delivered)
-#         .filter(
-#             models.Delivered.DeliveredDateTime >= month_start
-#         )
-#         .count()
-#     )
-
-#     return {
-#         "total_delivered": total_delivered,
-#         "today_delivered": today_delivered,
-#         "month_delivered": month_delivered,
-#         "filtered_total": filtered_total,
-#         "items": records
-#     }
 
 @app.get("/location_logs/track/{frame}")
 def get_location_log_simple(
